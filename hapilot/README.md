@@ -24,12 +24,13 @@
 2. Add: `https://github.com/grizlygreen/hapilot-addons`
 3. Найти HAPilot → Install
 4. Configuration:
-   ```yaml
-   telegram_bot_token: "ВАШ_ТОКЕН_ОТ_BOTFATHER"
-   allowed_user_ids:
-     - 123456789
-   instance_name: "Дом"
    ```
+   telegram_bot_token: ВАШ_ТОКЕН_ОТ_BOTFATHER
+   allowed_user_ids: 123456789
+   admin_user_ids: 123456789          (или несколько через запятую)
+   instance_name: Дом
+   ```
+   Несколько id через запятую: `123456789,987654321`
 5. Start
 
 ## Получение Telegram bot token
@@ -48,8 +49,8 @@
 | Опция | Тип | Описание |
 |-------|-----|----------|
 | `telegram_bot_token` | string | Токен бота от @BotFather |
-| `allowed_user_ids` | list of int | Кто может пользоваться ботом |
-| `admin_user_ids` | list of int | Кто видит «⚙ Настройки». По умолчанию = первый из allowed_user_ids |
+| `allowed_user_ids` | string | Telegram user_id-ы через запятую: `27059994,123456` |
+| `admin_user_ids` | string | Кто видит «⚙ Настройки». По умолчанию = первый из allowed. Админ неявно allowed. |
 | `instance_name` | string | Имя дома, отображается в боте (по умолчанию "Дом") |
 | `confirm_critical` | bool | Запрашивать подтверждение для замков и тревог |
 | `cache_ttl_seconds` | int | Как часто бот опрашивает HA (30-600 сек) |

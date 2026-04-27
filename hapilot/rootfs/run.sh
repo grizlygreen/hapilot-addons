@@ -7,8 +7,8 @@ export TG_BOT_TOKEN="$(bashio::config 'telegram_bot_token')"
 export INSTANCE_NAME="$(bashio::config 'instance_name')"
 export CONFIRM_CRITICAL="$(bashio::config 'confirm_critical')"
 export CACHE_TTL_SECONDS="$(bashio::config 'cache_ttl_seconds')"
-export ALLOWED_USER_IDS="$(bashio::config 'allowed_user_ids | join(",")')"
-export ADMIN_USER_IDS="$(bashio::config 'admin_user_ids | join(",")')"
+export ALLOWED_USER_IDS="$(bashio::config 'allowed_user_ids')"
+export ADMIN_USER_IDS="$(bashio::config 'admin_user_ids')"
 export LOG_LEVEL="$(bashio::config 'log_level' | tr '[:lower:]' '[:upper:]')"
 
 # HA Core REST API через Supervisor proxy

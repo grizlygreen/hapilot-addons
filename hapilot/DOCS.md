@@ -7,10 +7,11 @@ Universal Telegram bot для Home Assistant с автодискавери.
 1. Создать бота через `@BotFather` (`/newbot`)
 2. Узнать свой Telegram user_id через `@userinfobot`
 3. В Configuration:
-   ```yaml
-   telegram_bot_token: "1234:ABC..."
-   allowed_user_ids: [123456789]
    ```
+   telegram_bot_token: 1234:ABC...
+   allowed_user_ids: 123456789
+   ```
+   Несколько id через запятую: `123,456,789`
 4. Start
 5. В Telegram: `/start` боту
 
