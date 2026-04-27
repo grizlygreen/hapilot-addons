@@ -10,6 +10,11 @@ export CACHE_TTL_SECONDS="$(bashio::config 'cache_ttl_seconds')"
 export ALLOWED_USER_IDS="$(bashio::config 'allowed_user_ids')"
 export ADMIN_USER_IDS="$(bashio::config 'admin_user_ids')"
 export LOG_LEVEL="$(bashio::config 'log_level' | tr '[:lower:]' '[:upper:]')"
+export TG_PROXY_URL="$(bashio::config 'proxy_url')"
+
+if [ -n "$TG_PROXY_URL" ]; then
+    bashio::log.info "Using proxy: $TG_PROXY_URL"
+fi
 
 # HA Core REST API через Supervisor proxy
 export HA_URL="http://supervisor/core"

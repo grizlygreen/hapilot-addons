@@ -125,7 +125,14 @@ async def main():
 
     ha = HAClient(ha_url, ha_token)
     vis = VisibilityStore(os.environ.get("VISIBILITY_PATH", "./data/visibility.json"))
-    bot = Bot(token=tg_token)
+
+    proxy_url = os.environ.get("TG_PROXY_URL", "").strip()
+    if proxy_url:
+        from aiogram.client.session.aiohttp import AiohttpSession
+        log.info("Using Telegram proxy: %s", proxy_url)
+        bot = Bot(token=tg_token, session=AiohttpSession(proxy=proxy_url))
+    else:
+        bot = Bot(token=tg_token)
     dp = Dispatcher()
 
     # short id ↔ entity_id cache (в памяти)
