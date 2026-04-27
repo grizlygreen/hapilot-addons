@@ -25,11 +25,37 @@ def kb_entity_actions(
                 InlineKeyboardButton(text="🟢 Включить", callback_data=f"a:{short}:on"),
             ])
 
-    if domain == "light" and "brightness" in attrs:
-        rows.append([
-            InlineKeyboardButton(text="-25%", callback_data=f"a:{short}:dim_down"),
-            InlineKeyboardButton(text="+25%", callback_data=f"a:{short}:dim_up"),
-        ])
+    if domain == "light":
+        color_modes = attrs.get("supported_color_modes") or []
+        has_brightness = "brightness" in attrs or "brightness" in color_modes \
+            or any(m in color_modes for m in ("color_temp", "rgb", "rgbw", "rgbww", "hs", "xy"))
+        has_color_temp = "color_temp" in color_modes
+        has_rgb = any(m in color_modes for m in ("rgb", "rgbw", "rgbww", "hs", "xy"))
+
+        if has_brightness:
+            rows.append([
+                InlineKeyboardButton(text="-25%", callback_data=f"a:{short}:dim_down"),
+                InlineKeyboardButton(text="+25%", callback_data=f"a:{short}:dim_up"),
+            ])
+        if has_color_temp:
+            rows.append([
+                InlineKeyboardButton(text="🔥 Тёплый", callback_data=f"a:{short}:temp:2700"),
+                InlineKeyboardButton(text="☀ Дневной", callback_data=f"a:{short}:temp:4000"),
+                InlineKeyboardButton(text="🌒 Холодный", callback_data=f"a:{short}:temp:6500"),
+            ])
+        if has_rgb:
+            rows.append([
+                InlineKeyboardButton(text="🔴", callback_data=f"a:{short}:rgb:255,0,0"),
+                InlineKeyboardButton(text="🟠", callback_data=f"a:{short}:rgb:255,128,0"),
+                InlineKeyboardButton(text="🟡", callback_data=f"a:{short}:rgb:255,230,0"),
+                InlineKeyboardButton(text="🟢", callback_data=f"a:{short}:rgb:0,255,0"),
+            ])
+            rows.append([
+                InlineKeyboardButton(text="🔵", callback_data=f"a:{short}:rgb:0,80,255"),
+                InlineKeyboardButton(text="🟣", callback_data=f"a:{short}:rgb:160,0,255"),
+                InlineKeyboardButton(text="🩷", callback_data=f"a:{short}:rgb:255,80,200"),
+                InlineKeyboardButton(text="⚪", callback_data=f"a:{short}:rgb:255,255,255"),
+            ])
 
     if domain == "fan":
         for preset in attrs.get("preset_modes", []) or []:
@@ -129,6 +155,14 @@ async def execute_action(
         elif action.startswith("preset:"):
             preset = action.split(":", 1)[1]
             await ha.call_service("fan", "set_preset_mode", entity_id, {"preset_mode": preset})
+        elif action.startswith("temp:"):
+            kelvin = int(action.split(":", 1)[1])
+            await ha.call_service("light", "turn_on", entity_id,
+                                  {"color_temp_kelvin": kelvin, "brightness_pct": 100})
+        elif action.startswith("rgb:"):
+            r, g, b = (int(x) for x in action.split(":", 1)[1].split(","))
+            await ha.call_service("light", "turn_on", entity_id,
+                                  {"rgb_color": [r, g, b], "brightness_pct": 100})
         else:
             return False, f"Неизвестное действие: {action}"
         return True, "Готово"

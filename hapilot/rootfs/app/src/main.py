@@ -24,6 +24,7 @@ from .menus.actions import (
     needs_confirmation,
 )
 from .menus.alerts import kb_alerts_problems, kb_alerts_root, kb_alerts_unavail
+from .menus.domains import kb_domain_entities, kb_domains_root
 from .menus.rooms import kb_room_domain, kb_room_domains, kb_rooms_root
 from .visibility import VisibilityStore
 
@@ -66,7 +67,7 @@ async def update_message(cb, text: str, *, reply_markup=None, parse_mode: str = 
 def kb_main_menu(is_admin: bool, edit_mode: bool) -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton(text="📍 По комнатам", callback_data="r:")],
-        [InlineKeyboardButton(text="📋 По типам (TODO)", callback_data="d:")],
+        [InlineKeyboardButton(text="📋 По типам", callback_data="d:")],
         [InlineKeyboardButton(text="🚨 Алерты", callback_data="al:")],
     ]
     if is_admin:
@@ -189,6 +190,29 @@ async def main():
             f"В edit-mode заходи в комнаты и тыкай ✅/🙈 у каждого устройства."
         )
         await update_message(cb, text, reply_markup=kb_settings_menu(em, vis), parse_mode="HTML")
+
+    @dp.callback_query(F.data == "noop")
+    async def cb_noop(cb: CallbackQuery):
+        await cb.answer()
+
+    @dp.callback_query(F.data.startswith("d:"))
+    async def cb_domains(cb: CallbackQuery):
+        if not is_allowed(cb.from_user.id, allowed_user_ids, admin_user_ids):
+            return await cb.answer("Доступ запрещён", show_alert=True)
+        try:
+            snap = await ha.refresh_snapshot(cache_ttl)
+        except Exception:
+            return await cb.answer("⚠ HA недоступен", show_alert=True)
+        sub = cb.data[2:]
+        if sub == "":
+            await update_message(cb, "📋 <b>По типам</b>",
+                                 reply_markup=kb_domains_root(snap, vis),
+                                 parse_mode="HTML")
+        else:
+            domain = sub
+            title, kb = kb_domain_entities(snap, domain, id_cache, vis)
+            await update_message(cb, title, reply_markup=kb, parse_mode="HTML")
+        await cb.answer()
 
     @dp.callback_query(F.data.startswith("al:"))
     async def cb_alerts(cb: CallbackQuery):
