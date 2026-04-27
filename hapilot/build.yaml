@@ -1,7 +1,7 @@
 build_from:
-  amd64: ghcr.io/hassio-addons/base/amd64:18.0.4
-  aarch64: ghcr.io/hassio-addons/base/aarch64:18.0.4
-  armv7: ghcr.io/hassio-addons/base/armv7:18.0.4
+  amd64: ghcr.io/hassio-addons/base/amd64:20.1.0
+  aarch64: ghcr.io/hassio-addons/base/aarch64:20.1.0
+  armv7: ghcr.io/hassio-addons/base/armv7:20.1.0
 labels:
   org.opencontainers.image.title: HAPilot
   org.opencontainers.image.description: Universal Telegram bot for Home Assistant
