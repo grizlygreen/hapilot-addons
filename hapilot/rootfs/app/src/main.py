@@ -85,8 +85,9 @@ def kb_settings_menu(edit_mode: bool, vis: VisibilityStore) -> InlineKeyboardMar
     ])
 
 
-def is_allowed(user_id: int, allowed: set[int]) -> bool:
-    return user_id in allowed
+def is_allowed(user_id: int, allowed: set[int], admins: set[int] | None = None) -> bool:
+    """Админ неявно allowed."""
+    return user_id in allowed or (admins is not None and user_id in admins)
 
 
 def is_admin(user_id: int, admins: set[int]) -> bool:
@@ -137,7 +138,7 @@ async def main():
 
     @dp.message(Command("start"))
     async def cmd_start(msg: Message):
-        if not is_allowed(msg.from_user.id, allowed_user_ids):
+        if not is_allowed(msg.from_user.id, allowed_user_ids, admin_user_ids):
             await msg.reply("Доступ запрещён.")
             log.warning("denied access user_id=%s", msg.from_user.id)
             return
@@ -149,7 +150,7 @@ async def main():
 
     @dp.callback_query(F.data == "m")
     async def cb_main(cb: CallbackQuery):
-        if not is_allowed(cb.from_user.id, allowed_user_ids):
+        if not is_allowed(cb.from_user.id, allowed_user_ids, admin_user_ids):
             return await cb.answer("Доступ запрещён", show_alert=True)
         await update_message(cb, 
             f"🏠 <b>{_h(instance_name)}</b>\nВыберите способ управления:",
@@ -184,7 +185,7 @@ async def main():
 
     @dp.callback_query(F.data.startswith("al:"))
     async def cb_alerts(cb: CallbackQuery):
-        if not is_allowed(cb.from_user.id, allowed_user_ids):
+        if not is_allowed(cb.from_user.id, allowed_user_ids, admin_user_ids):
             return await cb.answer("Доступ запрещён", show_alert=True)
         try:
             snap = await ha.refresh_snapshot(cache_ttl)
@@ -303,7 +304,7 @@ async def main():
 
     @dp.callback_query(F.data.startswith("r:"))
     async def cb_rooms(cb: CallbackQuery):
-        if not is_allowed(cb.from_user.id, allowed_user_ids):
+        if not is_allowed(cb.from_user.id, allowed_user_ids, admin_user_ids):
             return await cb.answer("Доступ запрещён", show_alert=True)
         try:
             snap = await ha.refresh_snapshot(cache_ttl)
@@ -372,7 +373,7 @@ async def main():
 
     @dp.callback_query(F.data.startswith("e:"))
     async def cb_entity(cb: CallbackQuery):
-        if not is_allowed(cb.from_user.id, allowed_user_ids):
+        if not is_allowed(cb.from_user.id, allowed_user_ids, admin_user_ids):
             return await cb.answer("Доступ запрещён", show_alert=True)
         short = cb.data.split(":", 1)[1]
         entity_id = id_cache.get(short)
@@ -407,7 +408,7 @@ async def main():
 
     @dp.callback_query(F.data.startswith("a:"))
     async def cb_action(cb: CallbackQuery):
-        if not is_allowed(cb.from_user.id, allowed_user_ids):
+        if not is_allowed(cb.from_user.id, allowed_user_ids, admin_user_ids):
             return await cb.answer("Доступ запрещён", show_alert=True)
         _, short, *rest = cb.data.split(":")
         action = ":".join(rest)
@@ -488,7 +489,7 @@ async def main():
 
     @dp.callback_query(F.data.startswith("c:"))
     async def cb_confirm(cb: CallbackQuery):
-        if not is_allowed(cb.from_user.id, allowed_user_ids):
+        if not is_allowed(cb.from_user.id, allowed_user_ids, admin_user_ids):
             return await cb.answer("Доступ запрещён", show_alert=True)
         _, short, action = cb.data.split(":")
         entity_id = id_cache.get(short)

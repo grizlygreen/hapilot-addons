@@ -15,3 +15,7 @@
 - Edit-mode для админа: настройка видимости устройств
 - Whitelist user_ids
 - Persistence в `/config/visibility.json`
+
+## 0.1.1 — 2026-04-27
+
+- Fix: admin_user_ids теперь неявно allowed (раньше нужно было дублировать id в allowed_user_ids)
