@@ -1,0 +1,35 @@
+name: HAPilot
+version: "0.1.0"
+slug: hapilot
+description: Universal Telegram bot for Home Assistant — auto-discovery, no per-instance setup
+url: https://github.com/grizlygreen/hapilot-addons
+arch:
+  - amd64
+  - aarch64
+  - armv7
+init: false
+homeassistant_api: true
+hassio_api: true
+hassio_role: default
+boot: auto
+startup: application
+map:
+  - addon_config:rw
+options:
+  telegram_bot_token: ""
+  allowed_user_ids: []
+  admin_user_ids: []
+  instance_name: "Дом"
+  confirm_critical: true
+  cache_ttl_seconds: 60
+  log_level: info
+schema:
+  telegram_bot_token: str
+  allowed_user_ids:
+    - int
+  admin_user_ids:
+    - int?
+  instance_name: str
+  confirm_critical: bool
+  cache_ttl_seconds: int(30,600)
+  log_level: list(trace|debug|info|notice|warning|error|fatal)?
