@@ -124,6 +124,34 @@ def binary_state_label(entity_id: str, attributes: dict, state: str) -> tuple[st
     # unavailable / unknown
     return "❓", str(state)
 
+
+def format_state(state_val, attributes: dict | None = None) -> str:
+    """Округлить числовой state до разумного числа знаков.
+
+    HA REST API возвращает raw state без округления. Если в атрибутах задан
+    suggested_display_precision — используем его, иначе — максимум 2 знака.
+    Не-числовые значения возвращаем как строку без изменений.
+    """
+    s = str(state_val)
+    # Быстрый отфильтр: должны быть только цифры/точка/минус
+    try:
+        f = float(s)
+    except (ValueError, TypeError):
+        return s
+    # Целые — без хвоста ".0"
+    if f == int(f) and "." not in s and "e" not in s.lower():
+        return s
+    precision = 2
+    if attributes:
+        sp = attributes.get("suggested_display_precision")
+        if isinstance(sp, int) and 0 <= sp <= 6:
+            precision = sp
+    formatted = f"{f:.{precision}f}"
+    # Trim trailing zeros: "12.30" → "12.3", "12.00" → "12"
+    if "." in formatted:
+        formatted = formatted.rstrip("0").rstrip(".")
+    return formatted
+
 # Critical entities — требуют confirmation перед действием
 CRITICAL_KEYWORDS = (
     "lock", "alarm", "water", "boiler", "gas", "fire",

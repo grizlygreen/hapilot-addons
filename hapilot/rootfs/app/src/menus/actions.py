@@ -7,7 +7,8 @@ from ..ha_client import HAClient
 
 
 def kb_entity_actions(
-    entity_id: str, state: dict, short: str, back_to: str = "m"
+    entity_id: str, state: dict, short: str, back_to: str = "m",
+    is_favorite: bool = False,
 ) -> InlineKeyboardMarkup:
     """Клавиатура с действиями для конкретной entity."""
     domain = entity_id.split(".", 1)[0]
@@ -66,6 +67,104 @@ def kb_entity_actions(
                 )
             ])
 
+    if domain == "climate":
+        # HVAC режимы
+        hvac_icons = {
+            "off": ("⚪", "Выкл"),
+            "heat": ("🔥", "Нагрев"),
+            "cool": ("❄", "Охлаж"),
+            "heat_cool": ("🌡", "Авто"),
+            "auto": ("🤖", "Авто"),
+            "dry": ("💧", "Сушка"),
+            "fan_only": ("🌪", "Вентил"),
+        }
+        cur_mode = state_val
+        modes = attrs.get("hvac_modes") or []
+        if modes:
+            mode_btns = []
+            for m in modes:
+                icon, label = hvac_icons.get(m, ("•", m))
+                mark = "✓ " if m == cur_mode else ""
+                mode_btns.append(InlineKeyboardButton(
+                    text=f"{mark}{icon} {label}",
+                    callback_data=f"a:{short}:climate_mode:{m}"[:64],
+                ))
+            # bulk into rows of 3
+            for i in range(0, len(mode_btns), 3):
+                rows.append(mode_btns[i:i+3])
+
+        # Температура: одна точка ИЛИ диапазон low/high
+        cur_t = attrs.get("temperature")
+        cur_low = attrs.get("target_temp_low")
+        cur_high = attrs.get("target_temp_high")
+        if cur_t is not None:
+            rows.append([
+                InlineKeyboardButton(text="-1°", callback_data=f"a:{short}:climate_temp:-1"),
+                InlineKeyboardButton(text="-0.5°", callback_data=f"a:{short}:climate_temp:-0.5"),
+                InlineKeyboardButton(text=f"{cur_t}°", callback_data="noop"),
+                InlineKeyboardButton(text="+0.5°", callback_data=f"a:{short}:climate_temp:0.5"),
+                InlineKeyboardButton(text="+1°", callback_data=f"a:{short}:climate_temp:1"),
+            ])
+        elif cur_low is not None or cur_high is not None:
+            # Диапазонный режим (heat_cool с target_temp_low/high)
+            if cur_low is not None:
+                rows.append([
+                    InlineKeyboardButton(text="🟦 -1°", callback_data=f"a:{short}:climate_temp_low:-1"),
+                    InlineKeyboardButton(text="-0.5°", callback_data=f"a:{short}:climate_temp_low:-0.5"),
+                    InlineKeyboardButton(text=f"низ {cur_low}°", callback_data="noop"),
+                    InlineKeyboardButton(text="+0.5°", callback_data=f"a:{short}:climate_temp_low:0.5"),
+                    InlineKeyboardButton(text="+1°", callback_data=f"a:{short}:climate_temp_low:1"),
+                ])
+            if cur_high is not None:
+                rows.append([
+                    InlineKeyboardButton(text="🟥 -1°", callback_data=f"a:{short}:climate_temp_high:-1"),
+                    InlineKeyboardButton(text="-0.5°", callback_data=f"a:{short}:climate_temp_high:-0.5"),
+                    InlineKeyboardButton(text=f"верх {cur_high}°", callback_data="noop"),
+                    InlineKeyboardButton(text="+0.5°", callback_data=f"a:{short}:climate_temp_high:0.5"),
+                    InlineKeyboardButton(text="+1°", callback_data=f"a:{short}:climate_temp_high:1"),
+                ])
+
+        # Preset modes (away / home / eco / boost / sleep)
+        presets = attrs.get("preset_modes") or []
+        cur_preset = attrs.get("preset_mode")
+        if presets:
+            p_btns = []
+            for p in presets:
+                mark = "✓ " if p == cur_preset else ""
+                p_btns.append(InlineKeyboardButton(
+                    text=f"{mark}{p}", callback_data=f"a:{short}:climate_preset:{p}"[:64],
+                ))
+            for i in range(0, len(p_btns), 3):
+                rows.append(p_btns[i:i+3])
+
+        # Fan modes
+        fans = attrs.get("fan_modes") or []
+        cur_fan = attrs.get("fan_mode")
+        if fans:
+            f_btns = []
+            for fm in fans:
+                mark = "✓ " if fm == cur_fan else ""
+                f_btns.append(InlineKeyboardButton(
+                    text=f"{mark}🌪 {fm}", callback_data=f"a:{short}:climate_fan:{fm}"[:64],
+                ))
+            for i in range(0, len(f_btns), 3):
+                rows.append(f_btns[i:i+3])
+
+    if domain == "humidifier":
+        cur_h = attrs.get("humidity")
+        if cur_h is not None:
+            rows.append([
+                InlineKeyboardButton(text="-5%", callback_data=f"a:{short}:humidity:-5"),
+                InlineKeyboardButton(text=f"{cur_h}%", callback_data="noop"),
+                InlineKeyboardButton(text="+5%", callback_data=f"a:{short}:humidity:5"),
+            ])
+        for preset in attrs.get("available_modes") or []:
+            mark = "✓ " if preset == attrs.get("mode") else ""
+            rows.append([InlineKeyboardButton(
+                text=f"{mark}⚙ {preset}",
+                callback_data=f"a:{short}:hum_mode:{preset}"[:64],
+            )])
+
     if domain == "scene":
         rows.append([
             InlineKeyboardButton(text="🎬 Активировать", callback_data=f"a:{short}:scene"),
@@ -101,8 +200,16 @@ def kb_entity_actions(
                 InlineKeyboardButton(text="🔐 Запереть", callback_data=f"a:{short}:lock"),
             ])
 
-    rows.append([InlineKeyboardButton(text="🔄 Обновить", callback_data=f"e:{short}")])
-    rows.append([InlineKeyboardButton(text="← Назад", callback_data=back_to)])
+    fav_text = "✩ Убрать из избранного" if is_favorite else "⭐ В избранное"
+    rows.append([
+        InlineKeyboardButton(text="🔄 Обновить", callback_data=f"e:{short}"),
+        InlineKeyboardButton(text=fav_text, callback_data=f"tf:{short}"),
+    ])
+    # Кнопка "🏠 Меню" не дублирует "← Назад", если они идентичны (back_to == "m")
+    nav = [InlineKeyboardButton(text="← Назад", callback_data=back_to)]
+    if back_to != "m":
+        nav.append(InlineKeyboardButton(text="🏠 Меню", callback_data="m"))
+    rows.append(nav)
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -163,6 +270,55 @@ async def execute_action(
             r, g, b = (int(x) for x in action.split(":", 1)[1].split(","))
             await ha.call_service("light", "turn_on", entity_id,
                                   {"rgb_color": [r, g, b], "brightness_pct": 100})
+        elif action.startswith("climate_mode:"):
+            mode = action.split(":", 1)[1]
+            await ha.call_service("climate", "set_hvac_mode", entity_id, {"hvac_mode": mode})
+        elif action.startswith("climate_temp:"):
+            delta = float(action.split(":", 1)[1])
+            st = await ha.get_state(entity_id)
+            cur = (st or {}).get("attributes", {}).get("temperature")
+            if cur is None:
+                return False, "Нет target_temperature"
+            new_t = round(float(cur) + delta, 1)
+            await ha.call_service("climate", "set_temperature", entity_id, {"temperature": new_t})
+        elif action.startswith("climate_temp_low:") or action.startswith("climate_temp_high:"):
+            kind, raw = action.split(":", 1)
+            delta = float(raw)
+            st = await ha.get_state(entity_id)
+            attrs = (st or {}).get("attributes", {})
+            cur_low = attrs.get("target_temp_low")
+            cur_high = attrs.get("target_temp_high")
+            if cur_low is None or cur_high is None:
+                return False, "Нет target_temp_low/high"
+            if kind == "climate_temp_low":
+                new_low = round(float(cur_low) + delta, 1)
+                new_high = float(cur_high)
+                if new_low > new_high:
+                    new_low = new_high
+            else:
+                new_high = round(float(cur_high) + delta, 1)
+                new_low = float(cur_low)
+                if new_high < new_low:
+                    new_high = new_low
+            await ha.call_service("climate", "set_temperature", entity_id,
+                                  {"target_temp_low": new_low, "target_temp_high": new_high})
+        elif action.startswith("climate_preset:"):
+            preset = action.split(":", 1)[1]
+            await ha.call_service("climate", "set_preset_mode", entity_id, {"preset_mode": preset})
+        elif action.startswith("climate_fan:"):
+            fm = action.split(":", 1)[1]
+            await ha.call_service("climate", "set_fan_mode", entity_id, {"fan_mode": fm})
+        elif action.startswith("humidity:"):
+            delta = int(action.split(":", 1)[1])
+            st = await ha.get_state(entity_id)
+            cur = (st or {}).get("attributes", {}).get("humidity")
+            if cur is None:
+                return False, "Нет target humidity"
+            new_h = max(0, min(100, int(cur) + delta))
+            await ha.call_service("humidifier", "set_humidity", entity_id, {"humidity": new_h})
+        elif action.startswith("hum_mode:"):
+            mode = action.split(":", 1)[1]
+            await ha.call_service("humidifier", "set_mode", entity_id, {"mode": mode})
         else:
             return False, f"Неизвестное действие: {action}"
         return True, "Готово"

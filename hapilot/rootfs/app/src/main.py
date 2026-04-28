@@ -15,8 +15,16 @@ from aiogram.types import (
 )
 from dotenv import load_dotenv
 
-from .classifiers import icon_for_area
+from .classifiers import (
+    BINARY_BY_DEVICE_CLASS,
+    SENSOR_BY_DEVICE_CLASS,
+    format_state,
+    icon_for_area,
+    label_for_domain,
+)
+from .favorites import FavoritesStore
 from .ha_client import HAClient
+from .live import Screen, ScreenRegistry, state_changed_loop
 from .menus.actions import (
     execute_action,
     kb_confirm,
@@ -24,8 +32,21 @@ from .menus.actions import (
     needs_confirmation,
 )
 from .menus.alerts import kb_alerts_problems, kb_alerts_root, kb_alerts_unavail
-from .menus.domains import kb_domain_entities, kb_domains_root
-from .menus.rooms import kb_room_domain, kb_room_domains, kb_rooms_root
+from .menus.domains import (
+    SPLIT_BY_CLASS,
+    kb_domain_classes,
+    kb_domain_entities,
+    kb_domains_root,
+)
+from .menus.favorites import kb_favorites
+from .menus.rooms import (
+    ROOM_SPLIT_DOMAINS,
+    ROOM_SPLIT_THRESHOLD,
+    kb_room_classes,
+    kb_room_domain,
+    kb_room_domains,
+    kb_rooms_root,
+)
 from .visibility import VisibilityStore
 
 logging.basicConfig(
@@ -64,12 +85,15 @@ async def update_message(cb, text: str, *, reply_markup=None, parse_mode: str = 
         await cb.message.answer(text, reply_markup=reply_markup, parse_mode=parse_mode)
 
 
-def kb_main_menu(is_admin: bool, edit_mode: bool) -> InlineKeyboardMarkup:
-    rows = [
+def kb_main_menu(is_admin: bool, edit_mode: bool, favs_count: int = 0) -> InlineKeyboardMarkup:
+    rows = []
+    if favs_count > 0:
+        rows.append([InlineKeyboardButton(text=f"⭐ Избранное ({favs_count})", callback_data="f:")])
+    rows.extend([
         [InlineKeyboardButton(text="📍 По комнатам", callback_data="r:")],
         [InlineKeyboardButton(text="📋 По типам", callback_data="d:")],
         [InlineKeyboardButton(text="🚨 Алерты", callback_data="al:")],
-    ]
+    ])
     if is_admin:
         label = "⚙ Настройки" + (" 🔧 (edit-mode ON)" if edit_mode else "")
         rows.append([InlineKeyboardButton(text=label, callback_data="s:")])
@@ -126,6 +150,8 @@ async def main():
 
     ha = HAClient(ha_url, ha_token)
     vis = VisibilityStore(os.environ.get("VISIBILITY_PATH", "./data/visibility.json"))
+    favs = FavoritesStore(os.environ.get("FAVORITES_PATH", "./data/favorites.json"))
+    live_registry = ScreenRegistry()
 
     proxy_url = os.environ.get("TG_PROXY_URL", "").strip()
     if proxy_url:
@@ -142,7 +168,83 @@ async def main():
     edit_mode: dict[int, bool] = {}
 
     def _main_kb(uid: int) -> InlineKeyboardMarkup:
-        return kb_main_menu(is_admin(uid, admin_user_ids), edit_mode.get(uid, False))
+        return kb_main_menu(is_admin(uid, admin_user_ids), edit_mode.get(uid, False), len(favs))
+
+    def _register_live(cb: CallbackQuery, entity_ids, render_fn) -> None:
+        """Зарегистрировать текущий экран как live — будет авто-обновляться."""
+        if not cb.message:
+            return
+        live_registry.register(Screen(
+            chat_id=cb.message.chat.id,
+            message_id=cb.message.message_id,
+            entity_ids=set(entity_ids),
+            render=render_fn,
+        ))
+
+    async def _build_card(entity_id: str, short: str, back_to: str) -> tuple[str, InlineKeyboardMarkup]:
+        """Собрать text + клавиатуру для карточки entity. Тянет свежий get_state."""
+        st = await ha.get_state(entity_id) or {}
+        attrs = st.get("attributes", {})
+        fname = attrs.get("friendly_name", entity_id)
+        state = st.get("state", "?")
+        unit = attrs.get("unit_of_measurement", "")
+        domain = entity_id.split(".", 1)[0]
+        if entity_id.startswith("binary_sensor."):
+            from .classifiers import binary_state_label
+            bs_icon, bs_label = binary_state_label(entity_id, attrs, str(state))
+            state_render = f"{bs_icon} {bs_label}"
+        else:
+            state_render = f"{_h(format_state(state, attrs))}{_h(str(unit))}"
+        text = f"<b>{_h(fname)}</b>\n<code>{_h(entity_id)}</code>\nСостояние: <code>{state_render}</code>"
+        if attrs.get("preset_mode"):
+            text += f"\nРежим: <code>{_h(str(attrs['preset_mode']))}</code>"
+        if "brightness" in attrs and attrs["brightness"]:
+            pct = round(attrs["brightness"] / 255 * 100)
+            text += f"\nЯркость: <code>{pct}%</code>"
+        if domain == "climate":
+            cur_t = attrs.get("current_temperature")
+            tgt_t = attrs.get("temperature")
+            tgt_low = attrs.get("target_temp_low")
+            tgt_high = attrs.get("target_temp_high")
+            tunit = attrs.get("temperature_unit", "°C")
+            if cur_t is not None:
+                text += f"\nТекущая: <code>{cur_t}{_h(tunit)}</code>"
+            if tgt_t is not None:
+                text += f"\nЦель: <code>{tgt_t}{_h(tunit)}</code>"
+            elif tgt_low is not None and tgt_high is not None:
+                text += f"\nДиапазон: <code>{tgt_low}–{tgt_high}{_h(tunit)}</code>"
+            cur_h = attrs.get("current_humidity")
+            if cur_h is not None:
+                text += f"\nВлажность: <code>{cur_h}%</code>"
+            if attrs.get("hvac_action"):
+                text += f"\nДействие: <code>{_h(str(attrs['hvac_action']))}</code>"
+            if attrs.get("fan_mode"):
+                text += f"\nВентиляция: <code>{_h(str(attrs['fan_mode']))}</code>"
+        if domain == "humidifier":
+            tgt_h = attrs.get("humidity")
+            cur_h = attrs.get("current_humidity")
+            if cur_h is not None:
+                text += f"\nТекущая влажность: <code>{cur_h}%</code>"
+            if tgt_h is not None:
+                text += f"\nЦель: <code>{tgt_h}%</code>"
+            if attrs.get("mode"):
+                text += f"\nРежим: <code>{_h(str(attrs['mode']))}</code>"
+        kb = kb_entity_actions(entity_id, st, short, back_to=back_to, is_favorite=(entity_id in favs))
+        return text, kb
+
+    async def _safe_edit(chat_id: int, message_id: int, text: str, kb: InlineKeyboardMarkup) -> None:
+        """edit_message_text с глушением "message not modified" и недоступности."""
+        from aiogram.exceptions import TelegramBadRequest
+        try:
+            await bot.edit_message_text(
+                text=text, chat_id=chat_id, message_id=message_id,
+                reply_markup=kb, parse_mode="HTML",
+            )
+        except TelegramBadRequest as e:
+            if "not modified" not in str(e).lower():
+                log.debug("safe_edit: %s (chat=%s msg=%s)", e, chat_id, message_id)
+                # экран всё, разрегаем
+                live_registry.unregister(chat_id, message_id)
 
     @dp.message(Command("start"))
     async def cmd_start(msg: Message):
@@ -195,6 +297,45 @@ async def main():
     async def cb_noop(cb: CallbackQuery):
         await cb.answer()
 
+    @dp.callback_query(F.data == "f:")
+    async def cb_favorites(cb: CallbackQuery):
+        if not is_allowed(cb.from_user.id, allowed_user_ids, admin_user_ids):
+            return await cb.answer("Доступ запрещён", show_alert=True)
+        try:
+            snap = await ha.refresh_snapshot(cache_ttl)
+        except Exception:
+            return await cb.answer("⚠ HA недоступен", show_alert=True)
+        if len(favs) == 0:
+            return await cb.answer("Избранное пусто. Открой entity и нажми ⭐ чтобы добавить.", show_alert=True)
+        await update_message(cb, "⭐ <b>Избранное</b>",
+                             reply_markup=kb_favorites(snap, favs, id_cache),
+                             parse_mode="HTML")
+        # Live для всех текущих избранных entity
+        chat_id = cb.message.chat.id
+        message_id = cb.message.message_id
+        async def _render():
+            s = ha.snapshot
+            await _safe_edit(chat_id, message_id, "⭐ <b>Избранное</b>",
+                             kb_favorites(s, favs, id_cache))
+        _register_live(cb, list(favs.items), _render)
+        await cb.answer()
+
+    @dp.callback_query(F.data.startswith("tf:"))
+    async def cb_toggle_fav(cb: CallbackQuery):
+        """Toggle favorite: tf:<short>."""
+        if not is_allowed(cb.from_user.id, allowed_user_ids, admin_user_ids):
+            return await cb.answer("Доступ запрещён", show_alert=True)
+        short = cb.data.split(":", 1)[1]
+        eid = id_cache.get(short)
+        if not eid:
+            return await cb.answer("Сессия устарела, нажми /start", show_alert=True)
+        now_fav = favs.toggle(eid)
+        await cb.answer(f"{'⭐ Добавлено в избранное' if now_fav else '✩ Убрано из избранного'}")
+        log.info("favorite user=%s entity=%s state=%s", cb.from_user.id, eid, now_fav)
+        # перерисовать карточку — ⭐/✩ обновится
+        cb.data = f"e:{short}"  # type: ignore
+        await cb_entity(cb)
+
     @dp.callback_query(F.data.startswith("d:"))
     async def cb_domains(cb: CallbackQuery):
         if not is_allowed(cb.from_user.id, allowed_user_ids, admin_user_ids):
@@ -209,9 +350,38 @@ async def main():
                                  reply_markup=kb_domains_root(snap, vis),
                                  parse_mode="HTML")
         else:
-            domain = sub
-            title, kb = kb_domain_entities(snap, domain, id_cache, vis)
+            parts = sub.split(":", 1)
+            domain = parts[0]
+            device_class = parts[1] if len(parts) == 2 else None
+
+            # sensor/binary_sensor без device_class → подменю классов
+            if device_class is None and domain in SPLIT_BY_CLASS:
+                title, kb = kb_domain_classes(snap, domain, vis)
+                await update_message(cb, title, reply_markup=kb, parse_mode="HTML")
+                await cb.answer()
+                return
+
+            title, kb = kb_domain_entities(snap, domain, id_cache, vis, device_class)
             await update_message(cb, title, reply_markup=kb, parse_mode="HTML")
+            # Live: entity домена + (опц.) фильтр по классу
+            def _matches(e: dict) -> bool:
+                if not e["entity_id"].startswith(domain + "."):
+                    return False
+                if e.get("disabled_by") or not vis.is_visible(e):
+                    return False
+                if device_class is None:
+                    return True
+                st = snap.state(e["entity_id"]) or {}
+                dc = st.get("attributes", {}).get("device_class") or ""
+                return (device_class == "_other" and not dc) or (dc == device_class)
+            entity_ids = [e["entity_id"] for e in snap.entities if _matches(e)]
+            chat_id = cb.message.chat.id
+            message_id = cb.message.message_id
+            async def _render():
+                s = ha.snapshot
+                t, k = kb_domain_entities(s, domain, id_cache, vis, device_class)
+                await _safe_edit(chat_id, message_id, t, k)
+            _register_live(cb, entity_ids, _render)
         await cb.answer()
 
     @dp.callback_query(F.data.startswith("al:"))
@@ -371,12 +541,139 @@ async def main():
                 (a["name"] for a in snap.areas if a["area_id"] == area_id),
                 area_id,
             )
-            await update_message(cb, 
+            # Если в комнате слишком много sensor/binary_sensor — показываем подменю классов
+            if domain in ROOM_SPLIT_DOMAINS:
+                ent_count = sum(
+                    1 for e in snap.entities_in_area(area_id)
+                    if e["entity_id"].startswith(domain + ".")
+                    and not e.get("disabled_by")
+                    and (em or vis.is_visible(e))
+                )
+                if ent_count > ROOM_SPLIT_THRESHOLD:
+                    title = f"{icon_for_area(area_name)} <b>{_h(area_name)}</b> / {_h(label_for_domain(domain))}{suffix} — выбери класс"
+                    await update_message(cb, title,
+                        reply_markup=kb_room_classes(snap, area_id, domain, vis, em),
+                        parse_mode="HTML",
+                    )
+                    await cb.answer()
+                    return
+            title = f"{icon_for_area(area_name)} <b>{_h(area_name)}</b> / {_h(domain)}{suffix}"
+            await update_message(cb, title,
+                reply_markup=kb_room_domain(snap, area_id, domain, id_cache, vis, em),
+                parse_mode="HTML",
+            )
+            # Live: все entity этого домена в этой area, видимые
+            entity_ids = [
+                e["entity_id"] for e in snap.entities_in_area(area_id)
+                if e["entity_id"].startswith(domain + ".")
+                and not e.get("disabled_by")
+                and (em or vis.is_visible(e))
+            ]
+            chat_id = cb.message.chat.id
+            message_id = cb.message.message_id
+            async def _render():
+                s = ha.snapshot
+                kb = kb_room_domain(s, area_id, domain, id_cache, vis, em)
+                await _safe_edit(chat_id, message_id, title, kb)
+            _register_live(cb, entity_ids, _render)
+        elif len(parts) == 4:
+            # r:<area>:<domain>:<device_class>
+            area_id, domain, dc = parts[1], parts[2], parts[3]
+            area_name = next(
+                (a["name"] for a in snap.areas if a["area_id"] == area_id),
+                area_id,
+            )
+            table = SENSOR_BY_DEVICE_CLASS if domain == "sensor" else BINARY_BY_DEVICE_CLASS
+            if dc == "_other":
+                dc_label = "Прочее"
+            elif dc in table:
+                dc_label = table[dc][1]
+            else:
+                dc_label = dc
+            title = f"{icon_for_area(area_name)} <b>{_h(area_name)}</b> / {_h(dc_label)}{suffix}"
+            await update_message(cb, title,
+                reply_markup=kb_room_domain(snap, area_id, domain, id_cache, vis, em, device_class=dc),
+                parse_mode="HTML",
+            )
+            # Live: только entity класса dc
+            def _matches_dc(e: dict) -> bool:
+                if not e["entity_id"].startswith(domain + "."):
+                    return False
+                if e.get("disabled_by") or not (em or vis.is_visible(e)):
+                    return False
+                st = snap.state(e["entity_id"]) or {}
+                this_dc = st.get("attributes", {}).get("device_class") or ""
+                return (dc == "_other" and not this_dc) or (this_dc == dc)
+            entity_ids = [e["entity_id"] for e in snap.entities_in_area(area_id) if _matches_dc(e)]
+            chat_id = cb.message.chat.id
+            message_id = cb.message.message_id
+            async def _render():
+                s = ha.snapshot
+                kb = kb_room_domain(s, area_id, domain, id_cache, vis, em, device_class=dc)
+                await _safe_edit(chat_id, message_id, title, kb)
+            _register_live(cb, entity_ids, _render)
+        await cb.answer()
+
+    @dp.callback_query(F.data.startswith("ba:"))
+    async def cb_bulk_action(cb: CallbackQuery):
+        """Массовое действие: ba:<area_id>:<domain>:<on|off>."""
+        if not is_allowed(cb.from_user.id, allowed_user_ids, admin_user_ids):
+            return await cb.answer("Доступ запрещён", show_alert=True)
+        try:
+            _, area_id, domain, action = cb.data.split(":", 3)
+        except ValueError:
+            return await cb.answer("Битый callback", show_alert=True)
+        try:
+            snap = await ha.refresh_snapshot(cache_ttl)
+        except Exception:
+            return await cb.answer("⚠ HA недоступен", show_alert=True)
+
+        targets = [
+            e["entity_id"] for e in snap.entities_in_area(area_id)
+            if e["entity_id"].startswith(domain + ".")
+            and not e.get("disabled_by")
+            and vis.is_visible(e)
+        ]
+        if not targets:
+            return await cb.answer("Нет устройств", show_alert=True)
+
+        service = "turn_on" if action == "on" else "turn_off"
+        ok = 0
+        errors: list[str] = []
+        for eid in targets:
+            try:
+                await ha.call_service(domain, service, eid)
+                ok += 1
+            except Exception as e:
+                errors.append(f"{eid}: {e}")
+                log.warning("bulk %s/%s on %s failed: %s", domain, service, eid, e)
+
+        verb = "включил" if action == "on" else "выключил"
+        if errors:
+            await cb.answer(f"⚠ {verb} {ok}/{len(targets)}, ошибок: {len(errors)}", show_alert=True)
+        else:
+            await cb.answer(f"✓ {verb} {ok} шт.")
+        log.info("bulk user=%s area=%s domain=%s action=%s ok=%d/%d",
+                 cb.from_user.id, area_id, domain, action, ok, len(targets))
+
+        # Перерисовать список с обновлёнными статусами
+        await ha.refresh_snapshot(cache_ttl, force=True)
+        em = edit_mode.get(cb.from_user.id, False)
+        suffix = " 🔧" if em else ""
+        snap = ha.snapshot
+        area_name = next(
+            (a["name"] for a in snap.areas if a["area_id"] == area_id),
+            area_id,
+        )
+        try:
+            await update_message(
+                cb,
                 f"{icon_for_area(area_name)} <b>{_h(area_name)}</b> / {_h(domain)}{suffix}",
                 reply_markup=kb_room_domain(snap, area_id, domain, id_cache, vis, em),
                 parse_mode="HTML",
             )
-        await cb.answer()
+        except Exception:
+            pass
 
     @dp.callback_query(F.data.startswith("v:"))
     async def cb_visibility_toggle(cb: CallbackQuery):
@@ -410,31 +707,16 @@ async def main():
         entity_id = id_cache.get(short)
         if not entity_id:
             return await cb.answer("Сессия устарела, нажмите /start", show_alert=True)
-        st = await ha.get_state(entity_id) or {}
-        attrs = st.get("attributes", {})
-        fname = attrs.get("friendly_name", entity_id)
-        state = st.get("state", "?")
-        unit = attrs.get("unit_of_measurement", "")
-        domain = entity_id.split(".", 1)[0]
-
-        if entity_id.startswith("binary_sensor."):
-            from .classifiers import binary_state_label
-            bs_icon, bs_label = binary_state_label(entity_id, attrs, str(state))
-            state_render = f"{bs_icon} {bs_label}"
-        else:
-            state_render = f"{_h(str(state))}{_h(str(unit))}"
-        text = f"<b>{_h(fname)}</b>\n<code>{_h(entity_id)}</code>\nСостояние: <code>{state_render}</code>"
-        if attrs.get("preset_mode"):
-            text += f"\nРежим: <code>{_h(str(attrs['preset_mode']))}</code>"
-        if "brightness" in attrs and attrs["brightness"]:
-            pct = round(attrs["brightness"] / 255 * 100)
-            text += f"\nЯркость: <code>{pct}%</code>"
-
-        await update_message(cb, 
-            text,
-            reply_markup=kb_entity_actions(entity_id, st, short, back_to=id_cache.get("_parent", {}).get(short, "m")),
-            parse_mode="HTML",
-        )
+        back_to = id_cache.get("_parent", {}).get(short, "m")
+        text, kb = await _build_card(entity_id, short, back_to)
+        await update_message(cb, text, reply_markup=kb, parse_mode="HTML")
+        # Регистрируем экран как live — будет авто-обновляться при state_changed
+        chat_id = cb.message.chat.id
+        message_id = cb.message.message_id
+        async def _render():
+            t, k = await _build_card(entity_id, short, back_to)
+            await _safe_edit(chat_id, message_id, t, k)
+        _register_live(cb, [entity_id], _render)
         await cb.answer()
 
     @dp.callback_query(F.data.startswith("a:"))
@@ -502,7 +784,7 @@ async def main():
             bs_icon, bs_label = binary_state_label(entity_id, attrs, str(state))
             state_render = f"{bs_icon} {bs_label}"
         else:
-            state_render = f"{_h(str(state))}{_h(str(unit))}"
+            state_render = f"{_h(format_state(state, attrs))}{_h(str(unit))}"
         text = f"<b>{_h(fname)}</b>\n<code>{_h(entity_id)}</code>\nСостояние: <code>{state_render}</code>"
         if attrs.get("preset_mode"):
             text += f"\nРежим: <code>{_h(str(attrs['preset_mode']))}</code>"
@@ -512,7 +794,7 @@ async def main():
         try:
             await update_message(cb, 
                 text,
-                reply_markup=kb_entity_actions(entity_id, st, short, back_to=id_cache.get("_parent", {}).get(short, "m")),
+                reply_markup=kb_entity_actions(entity_id, st, short, back_to=id_cache.get("_parent", {}).get(short, "m"), is_favorite=(entity_id in favs)),
                 parse_mode="HTML",
             )
         except Exception:
@@ -533,15 +815,6 @@ async def main():
         )
         await cb.answer()
 
-    @dp.callback_query(F.data == "back")
-    async def cb_back(cb: CallbackQuery):
-        await update_message(cb, 
-            f"🏠 <b>{_h(instance_name)}</b>\nВыберите способ управления:",
-            reply_markup=kb_main_menu(instance_name),
-            parse_mode="HTML",
-        )
-        await cb.answer()
-
     # Прогрев snapshot при старте — не блокируем если HA недоступен
     log.info("warming up HA snapshot...")
     try:
@@ -549,10 +822,21 @@ async def main():
     except Exception as e:
         log.warning("Initial HA snapshot failed: %s — будем повторять при первом запросе", e)
 
-    log.info("HAPilot started")
+    # Live: callback на state_changed — обновляем cached states локально, чтобы
+    # render-функции видели свежий статус сразу, без force-refresh всего snapshot.
+    async def _on_state_changed(eid: str, old: dict, new: dict) -> None:
+        if new:
+            ha.snapshot.states[eid] = new
+
+    live_task = asyncio.create_task(state_changed_loop(
+        ha.ws_url, ha_token, live_registry, _on_state_changed,
+    ))
+
+    log.info("HAPilot started (live registry active)")
     try:
         await dp.start_polling(bot)
     finally:
+        live_task.cancel()
         await ha.close()
         await bot.session.close()
 

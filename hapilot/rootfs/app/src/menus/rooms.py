@@ -53,15 +53,22 @@ def _chunk(
     return rows
 
 from ..classifiers import (
+    BINARY_BY_DEVICE_CLASS,
     DOMAIN_LABEL,
+    SENSOR_BY_DEVICE_CLASS,
     binary_state_label,
     domain_is_actionable,
+    format_state,
     icon_for,
     icon_for_area,
     label_for_domain,
 )
 from ..ha_client import HASnapshot
 from ..visibility import VisibilityStore
+
+# Если в одной комнате больше этого числа sensor/binary_sensor — разбиваем по device_class
+ROOM_SPLIT_THRESHOLD = 10
+ROOM_SPLIT_DOMAINS = ("sensor", "binary_sensor")
 
 # CallBack data format (≤64 bytes):
 #   r:                          → меню "По комнатам" (список областей)
@@ -130,7 +137,54 @@ def kb_room_domains(
             callback_data=f"r:{area_id}:{d}"[:64],
         ))
     rows.extend(_chunk(btns))
-    rows.append([InlineKeyboardButton(text="← По комнатам", callback_data="r:")])
+    rows.append([
+        InlineKeyboardButton(text="← По комнатам", callback_data="r:"),
+        InlineKeyboardButton(text="🏠 Меню", callback_data="m"),
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def kb_room_classes(
+    snap: HASnapshot, area_id: str, domain: str, vis: VisibilityStore, edit: bool = False,
+) -> InlineKeyboardMarkup:
+    """Подменю device_class для sensor/binary_sensor внутри комнаты (когда entity > 10)."""
+    by_class: dict[str, int] = defaultdict(int)
+    for e in snap.entities_in_area(area_id):
+        if not e["entity_id"].startswith(domain + "."):
+            continue
+        if e.get("disabled_by"):
+            continue
+        if not edit and not vis.is_visible(e):
+            continue
+        st = snap.state(e["entity_id"]) or {}
+        dc = st.get("attributes", {}).get("device_class") or "_other"
+        by_class[dc] += 1
+
+    table = SENSOR_BY_DEVICE_CLASS if domain == "sensor" else BINARY_BY_DEVICE_CLASS
+    known = [c for c in table if c in by_class]
+    unknown = sorted(c for c in by_class if c not in table and c != "_other")
+    order = known + unknown
+    if "_other" in by_class:
+        order.append("_other")
+
+    btns = []
+    for dc in order:
+        n = by_class[dc]
+        if dc == "_other":
+            text = f"❓ Прочее ({n})"
+        elif dc in table:
+            icon, label = table[dc]
+            text = f"{icon} {label} ({n})"
+        else:
+            text = f"• {dc} ({n})"
+        btns.append(InlineKeyboardButton(
+            text=text, callback_data=f"r:{area_id}:{domain}:{dc}"[:64],
+        ))
+    rows = _chunk(btns)
+    rows.append([
+        InlineKeyboardButton(text="← Назад", callback_data=f"r:{area_id}"),
+        InlineKeyboardButton(text="🏠 Меню", callback_data="m"),
+    ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -141,15 +195,46 @@ def kb_room_domain(
     id_cache: dict,
     vis: VisibilityStore,
     edit: bool = False,
+    device_class: str | None = None,
 ) -> InlineKeyboardMarkup:
-    """Конкретный домен в комнате — список entity с кнопками."""
+    """Конкретный домен в комнате — список entity с кнопками.
+
+    Если device_class задан — фильтр по нему ("_other" = без device_class).
+    """
     entities = [
         e for e in snap.entities_in_area(area_id)
         if e["entity_id"].startswith(domain + ".")
         and not e.get("disabled_by")
         and (edit or vis.is_visible(e))
     ]
+    if device_class is not None:
+        def _dc_match(e: dict) -> bool:
+            st = snap.state(e["entity_id"]) or {}
+            dc = st.get("attributes", {}).get("device_class") or ""
+            return (device_class == "_other" and not dc) or (dc == device_class)
+        entities = [e for e in entities if _dc_match(e)]
     entities.sort(key=lambda e: (e.get("name") or e.get("original_name") or e["entity_id"]).lower())
+
+    rows: list[list[InlineKeyboardButton]] = []
+
+    # Массовые действия для actionable доменов (только когда не edit-mode и есть >=2 entity)
+    if not edit and domain in ("light", "switch", "fan") and len(entities) >= 2:
+        # Сколько сейчас включено
+        on_count = sum(
+            1 for e in entities
+            if (snap.state(e["entity_id"]) or {}).get("state") == "on"
+        )
+        off_count = len(entities) - on_count
+        rows.append([
+            InlineKeyboardButton(
+                text=f"🟢 Все вкл ({off_count})",
+                callback_data=f"ba:{area_id}:{domain}:on"[:64],
+            ),
+            InlineKeyboardButton(
+                text=f"⚪ Все выкл ({on_count})",
+                callback_data=f"ba:{area_id}:{domain}:off"[:64],
+            ),
+        ])
 
     btns = []
     for e in entities:
@@ -180,12 +265,23 @@ def kb_room_domain(
             btns.append(InlineKeyboardButton(text=text, callback_data=f"e:{short}"[:64]))
         else:
             unit = attrs.get("unit_of_measurement", "")
-            value_str = f"{state_val}{unit}" if unit else state_val
+            val = format_state(state_val, attrs)
+            value_str = f"{val}{unit}" if unit else val
             text = f"{icon} {fname[:25]}: {value_str}"[:60]
             btns.append(InlineKeyboardButton(text=text, callback_data=f"e:{short}"[:64]))
 
-    rows = _chunk(btns)  # авто-grid по длине
-    rows.append([InlineKeyboardButton(text="← Назад", callback_data=f"r:{area_id}")])
+    rows.extend(_chunk(btns))  # авто-grid по длине
+    # Smart-back: если был фильтр по классу — назад в подменю классов
+    if device_class is not None and domain in ROOM_SPLIT_DOMAINS:
+        back_cb = f"r:{area_id}:{domain}"
+        back_label = "← Классы"
+    else:
+        back_cb = f"r:{area_id}"
+        back_label = "← Назад"
+    rows.append([
+        InlineKeyboardButton(text=back_label, callback_data=back_cb),
+        InlineKeyboardButton(text="🏠 Меню", callback_data="m"),
+    ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 

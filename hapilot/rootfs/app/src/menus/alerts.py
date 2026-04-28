@@ -114,7 +114,10 @@ def kb_alerts_problems(snap: HASnapshot) -> tuple[str, InlineKeyboardMarkup]:
             callback_data="al:ack_leak")])
     # Tamper / safety / problem — без авто-действий, только индикация
     rows.append([InlineKeyboardButton(text="🔄 Обновить", callback_data="al:problems")])
-    rows.append([InlineKeyboardButton(text="← Алерты", callback_data="al:")])
+    rows.append([
+        InlineKeyboardButton(text="← Алерты", callback_data="al:"),
+        InlineKeyboardButton(text="🏠 Меню", callback_data="m"),
+    ])
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -144,7 +147,10 @@ def kb_alerts_unavail(snap: HASnapshot) -> tuple[str, InlineKeyboardMarkup]:
             lines.append(f"• <code>{_h(eid)}</code>\n   <i>{state}</i> — {ago}")
         text = "\n".join(lines)
 
-    rows = [[InlineKeyboardButton(text="← Алерты", callback_data="al:")]]
+    rows = [[
+        InlineKeyboardButton(text="← Алерты", callback_data="al:"),
+        InlineKeyboardButton(text="🏠 Меню", callback_data="m"),
+    ]]
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 

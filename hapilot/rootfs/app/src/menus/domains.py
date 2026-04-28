@@ -6,14 +6,20 @@ from typing import Iterable
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from ..classifiers import (
+    BINARY_BY_DEVICE_CLASS,
+    SENSOR_BY_DEVICE_CLASS,
     binary_state_label,
     domain_is_actionable,
+    format_state,
     icon_for,
     icon_for_area,
     label_for_domain,
 )
 from ..ha_client import HASnapshot
 from ..visibility import VisibilityStore
+
+# Домены, которые ВСЕГДА разбиваем по device_class (много entity → не влезет в TG)
+SPLIT_BY_CLASS = ("sensor", "binary_sensor")
 
 
 # Какие домены показывать в меню (порядок)
@@ -73,10 +79,61 @@ def kb_domains_root(snap: HASnapshot, vis: VisibilityStore) -> InlineKeyboardMar
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def kb_domain_classes(
+    snap: HASnapshot, domain: str, vis: VisibilityStore,
+) -> tuple[str, InlineKeyboardMarkup]:
+    """Подменю device_class для sensor/binary_sensor."""
+    by_class: dict[str, int] = defaultdict(int)
+    for e in snap.entities:
+        if not e["entity_id"].startswith(domain + "."):
+            continue
+        if e.get("disabled_by"):
+            continue
+        if not vis.is_visible(e):
+            continue
+        st = snap.state(e["entity_id"]) or {}
+        dc = st.get("attributes", {}).get("device_class") or "_other"
+        by_class[dc] += 1
+
+    table = SENSOR_BY_DEVICE_CLASS if domain == "sensor" else BINARY_BY_DEVICE_CLASS
+    # Сортировка: known classes по таблице, остальные — алфавит, _other в конце
+    known = [c for c in table if c in by_class]
+    unknown = sorted(c for c in by_class if c not in table and c != "_other")
+    order = known + unknown
+    if "_other" in by_class:
+        order.append("_other")
+
+    btns = []
+    for dc in order:
+        n = by_class[dc]
+        if dc == "_other":
+            text = f"❓ Прочее ({n})"
+        elif dc in table:
+            icon, label = table[dc]
+            text = f"{icon} {label} ({n})"
+        else:
+            text = f"• {dc} ({n})"
+        btns.append(InlineKeyboardButton(
+            text=text, callback_data=f"d:{domain}:{dc}"[:64],
+        ))
+    rows = _chunk(btns)
+    rows.append([
+        InlineKeyboardButton(text="← По типам", callback_data="d:"),
+        InlineKeyboardButton(text="🏠 Меню", callback_data="m"),
+    ])
+    title = f"{icon_for(f'{domain}.x',{})} <b>{label_for_domain(domain)}</b> — выбери класс"
+    return title, InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def kb_domain_entities(
     snap: HASnapshot, domain: str, id_cache: dict, vis: VisibilityStore,
+    device_class: str | None = None,
 ) -> tuple[str, InlineKeyboardMarkup]:
-    """Список entities одного домена, сгруппированный по комнатам."""
+    """Список entities одного домена, сгруппированный по комнатам.
+
+    Если device_class задан — фильтруем по нему (для sensor/binary_sensor).
+    "_other" = entities без device_class.
+    """
     device_areas = {d["id"]: d.get("area_id") for d in snap.devices}
     areas_by_id = {a["area_id"]: a["name"] for a in snap.areas}
 
@@ -89,6 +146,15 @@ def kb_domain_entities(
             continue
         if not vis.is_visible(e):
             continue
+        if device_class is not None:
+            st = snap.state(e["entity_id"]) or {}
+            dc = st.get("attributes", {}).get("device_class") or ""
+            if device_class == "_other":
+                if dc:
+                    continue
+            else:
+                if dc != device_class:
+                    continue
         area_id = e.get("area_id") or device_areas.get(e.get("device_id")) or "_no_area"
         by_area[area_id].append(e)
 
@@ -136,13 +202,34 @@ def kb_domain_entities(
                 text = f"{mark} {icon} {fname[:30]}"
             else:
                 unit = attrs.get("unit_of_measurement", "")
-                value_str = f"{state_val}{unit}" if unit else state_val
+                val = format_state(state_val, attrs)
+                value_str = f"{val}{unit}" if unit else val
                 text = f"{icon} {fname[:25]}: {value_str}"[:60]
             btns.append(InlineKeyboardButton(text=text, callback_data=f"e:{short}"[:64]))
         rows.extend(_chunk(btns))
 
-    rows.append([InlineKeyboardButton(text="← По типам", callback_data="d:")])
+    # Smart-back: для sensor/binary_sensor с device_class — обратно в подменю классов
+    if device_class is not None and domain in SPLIT_BY_CLASS:
+        back_cb = f"d:{domain}"
+        back_label = "← Классы"
+    else:
+        back_cb = "d:"
+        back_label = "← По типам"
+    rows.append([
+        InlineKeyboardButton(text=back_label, callback_data=back_cb),
+        InlineKeyboardButton(text="🏠 Меню", callback_data="m"),
+    ])
+
+    # Заголовок: + класс если задан
     title = f"{icon_for(f'{domain}.x',{})} <b>{label_for_domain(domain)}</b>"
+    if device_class is not None:
+        table = SENSOR_BY_DEVICE_CLASS if domain == "sensor" else BINARY_BY_DEVICE_CLASS
+        if device_class == "_other":
+            title += " / Прочее"
+        elif device_class in table:
+            title += f" / {table[device_class][1]}"
+        else:
+            title += f" / {device_class}"
     return title, InlineKeyboardMarkup(inline_keyboard=rows)
 
 
