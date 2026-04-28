@@ -173,3 +173,44 @@ class HAClient:
             if r.status != 200:
                 return None
             return await r.read()
+
+    async def history(
+        self, entity_id: str, hours: int = 24
+    ) -> list[tuple[float, float]]:
+        """Получить историю numeric-сенсора за последние N часов.
+
+        Возвращает список (timestamp_unix, value) отсортированный по времени.
+        Невалидные/нечисловые точки пропускаются.
+        """
+        from datetime import datetime, timedelta, timezone
+        end_t = datetime.now(timezone.utc)
+        start_t = end_t - timedelta(hours=hours)
+        # HA history endpoint: /api/history/period/<start>?filter_entity_id=&end_time=
+        start_iso = start_t.strftime("%Y-%m-%dT%H:%M:%S")
+        end_iso = end_t.strftime("%Y-%m-%dT%H:%M:%S")
+        url = f"{self.url}/api/history/period/{start_iso}"
+        params = {
+            "filter_entity_id": entity_id,
+            "end_time": end_iso,
+            "minimal_response": "true",
+            "no_attributes": "true",
+        }
+        sess = await self.session()
+        async with sess.get(url, params=params, timeout=aiohttp.ClientTimeout(total=15)) as r:
+            r.raise_for_status()
+            data = await r.json()
+        # data — list of lists. Берём первый список (наш entity).
+        if not data or not data[0]:
+            return []
+        result: list[tuple[float, float]] = []
+        for point in data[0]:
+            try:
+                ts = datetime.fromisoformat(
+                    point["last_changed"].replace("Z", "+00:00")
+                ).timestamp()
+                v = float(point["state"])
+                result.append((ts, v))
+            except (KeyError, ValueError, TypeError):
+                continue
+        result.sort(key=lambda p: p[0])
+        return result

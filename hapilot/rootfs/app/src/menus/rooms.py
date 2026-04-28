@@ -70,6 +70,9 @@ from ..visibility import VisibilityStore
 ROOM_SPLIT_THRESHOLD = 10
 ROOM_SPLIT_DOMAINS = ("sensor", "binary_sensor")
 
+# Сколько entity показываем на одной странице меню (TG лимит ~100 кнопок + reply_markup size)
+PAGE_SIZE = 60
+
 # CallBack data format (≤64 bytes):
 #   r:                          → меню "По комнатам" (список областей)
 #   r:<area_id>                 → область → группы по доменам
@@ -196,10 +199,12 @@ def kb_room_domain(
     vis: VisibilityStore,
     edit: bool = False,
     device_class: str | None = None,
+    page: int = 1,
 ) -> InlineKeyboardMarkup:
     """Конкретный домен в комнате — список entity с кнопками.
 
     Если device_class задан — фильтр по нему ("_other" = без device_class).
+    Пагинация: PAGE_SIZE entity на страницу. Если total > PAGE_SIZE — кнопки ◀ N/M ▶.
     """
     entities = [
         e for e in snap.entities_in_area(area_id)
@@ -215,16 +220,22 @@ def kb_room_domain(
         entities = [e for e in entities if _dc_match(e)]
     entities.sort(key=lambda e: (e.get("name") or e.get("original_name") or e["entity_id"]).lower())
 
+    # Пагинация
+    all_entities = entities
+    total_pages = max(1, (len(all_entities) + PAGE_SIZE - 1) // PAGE_SIZE)
+    page = max(1, min(page, total_pages))
+    start = (page - 1) * PAGE_SIZE
+    entities = all_entities[start:start + PAGE_SIZE]
+
     rows: list[list[InlineKeyboardButton]] = []
 
-    # Массовые действия для actionable доменов (только когда не edit-mode и есть >=2 entity)
-    if not edit and domain in ("light", "switch", "fan") and len(entities) >= 2:
-        # Сколько сейчас включено
+    # Массовые действия для actionable доменов (по ВСЕМ entity домена, не только странице)
+    if not edit and domain in ("light", "switch", "fan") and len(all_entities) >= 2:
         on_count = sum(
-            1 for e in entities
+            1 for e in all_entities
             if (snap.state(e["entity_id"]) or {}).get("state") == "on"
         )
-        off_count = len(entities) - on_count
+        off_count = len(all_entities) - on_count
         rows.append([
             InlineKeyboardButton(
                 text=f"🟢 Все вкл ({off_count})",
@@ -271,6 +282,20 @@ def kb_room_domain(
             btns.append(InlineKeyboardButton(text=text, callback_data=f"e:{short}"[:64]))
 
     rows.extend(_chunk(btns))  # авто-grid по длине
+
+    # Пагинация
+    if total_pages > 1:
+        dc_token = device_class if device_class is not None else "_all"
+        nav: list[InlineKeyboardButton] = []
+        if page > 1:
+            nav.append(InlineKeyboardButton(
+                text="◀", callback_data=f"r:{area_id}:{domain}:{dc_token}:p{page-1}"[:64]))
+        nav.append(InlineKeyboardButton(text=f"{page}/{total_pages}", callback_data="noop"))
+        if page < total_pages:
+            nav.append(InlineKeyboardButton(
+                text="▶", callback_data=f"r:{area_id}:{domain}:{dc_token}:p{page+1}"[:64]))
+        rows.append(nav)
+
     # Smart-back: если был фильтр по классу — назад в подменю классов
     if device_class is not None and domain in ROOM_SPLIT_DOMAINS:
         back_cb = f"r:{area_id}:{domain}"

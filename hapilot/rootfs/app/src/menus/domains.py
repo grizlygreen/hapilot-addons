@@ -21,6 +21,9 @@ from ..visibility import VisibilityStore
 # Домены, которые ВСЕГДА разбиваем по device_class (много entity → не влезет в TG)
 SPLIT_BY_CLASS = ("sensor", "binary_sensor")
 
+# Сколько entity на одной странице меню
+PAGE_SIZE = 60
+
 
 # Какие домены показывать в меню (порядок)
 DOMAIN_ORDER = (
@@ -128,11 +131,14 @@ def kb_domain_classes(
 def kb_domain_entities(
     snap: HASnapshot, domain: str, id_cache: dict, vis: VisibilityStore,
     device_class: str | None = None,
+    page: int = 1,
 ) -> tuple[str, InlineKeyboardMarkup]:
     """Список entities одного домена, сгруппированный по комнатам.
 
     Если device_class задан — фильтруем по нему (для sensor/binary_sensor).
     "_other" = entities без device_class.
+    Пагинация: PAGE_SIZE entity на страницу. Группируем сначала по area, потом
+    разбиваем на страницы (заголовки area попадают в свою страницу).
     """
     device_areas = {d["id"]: d.get("area_id") for d in snap.devices}
     areas_by_id = {a["area_id"]: a["name"] for a in snap.areas}
@@ -167,46 +173,106 @@ def kb_domain_entities(
     if "_no_area" in by_area:
         sorted_areas.append("_no_area")
 
-    for area_id in sorted_areas:
-        ents = by_area[area_id]
-        ents.sort(key=lambda e: (
-            (e.get("name") or "")
-            or e.get("original_name") or e["entity_id"]
-        ).lower())
-        # Заголовок группы — пустая кнопка-разделитель (TG не любит без callback)
-        if area_id == "_no_area":
-            header = "🏠 Без комнаты"
-        else:
-            ai = icon_for_area(areas_by_id.get(area_id, area_id))
-            header = f"{ai} {areas_by_id.get(area_id, area_id)}"
-        rows.append([InlineKeyboardButton(text=f"— {header} —", callback_data="noop")])
+    # Считаем total для решения — нужна ли пагинация
+    total = sum(len(by_area[a]) for a in sorted_areas)
+    paginate = total > PAGE_SIZE
+    total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE) if paginate else 1
+    page = max(1, min(page, total_pages))
 
-        # Entities
+    if not paginate:
+        # Старый формат: заголовки area + entity, всё на одной странице
+        for area_id in sorted_areas:
+            ents = by_area[area_id]
+            ents.sort(key=lambda e: (
+                (e.get("name") or "")
+                or e.get("original_name") or e["entity_id"]
+            ).lower())
+            if area_id == "_no_area":
+                header = "🏠 Без комнаты"
+            else:
+                ai = icon_for_area(areas_by_id.get(area_id, area_id))
+                header = f"{ai} {areas_by_id.get(area_id, area_id)}"
+            rows.append([InlineKeyboardButton(text=f"— {header} —", callback_data="noop")])
+
+            btns = []
+            for e in ents:
+                eid = e["entity_id"]
+                st = snap.state(eid) or {}
+                attrs = st.get("attributes", {})
+                fname = attrs.get("friendly_name") or eid
+                state_val = st.get("state", "?")
+                short = _short_id(eid, id_cache)
+                id_cache.setdefault("_parent", {})[short] = f"d:{domain}"
+
+                icon = icon_for(eid, attrs)
+                if eid.startswith("binary_sensor."):
+                    bs_icon, bs_label = binary_state_label(eid, attrs, state_val)
+                    text = f"{bs_icon} {fname[:22]}: {bs_label}"
+                elif domain_is_actionable(domain):
+                    mark = "🟢" if state_val in ("on", "playing", "open", "unlocked", "home") else "⚪"
+                    text = f"{mark} {icon} {fname[:30]}"
+                else:
+                    unit = attrs.get("unit_of_measurement", "")
+                    val = format_state(state_val, attrs)
+                    value_str = f"{val}{unit}" if unit else val
+                    text = f"{icon} {fname[:25]}: {value_str}"[:60]
+                btns.append(InlineKeyboardButton(text=text, callback_data=f"e:{short}"[:64]))
+            rows.extend(_chunk(btns))
+    else:
+        # Пагинированный flat-список: имя area дописываем в текст entity
+        flat: list[tuple[dict, str]] = []  # (entity, area_label)
+        for area_id in sorted_areas:
+            ents = by_area[area_id]
+            ents.sort(key=lambda e: (
+                (e.get("name") or "")
+                or e.get("original_name") or e["entity_id"]
+            ).lower())
+            area_label = "Без" if area_id == "_no_area" else areas_by_id.get(area_id, area_id)
+            for e in ents:
+                flat.append((e, area_label))
+
+        start = (page - 1) * PAGE_SIZE
+        page_items = flat[start:start + PAGE_SIZE]
+
         btns = []
-        for e in ents:
+        for e, area_label in page_items:
             eid = e["entity_id"]
             st = snap.state(eid) or {}
             attrs = st.get("attributes", {})
             fname = attrs.get("friendly_name") or eid
             state_val = st.get("state", "?")
             short = _short_id(eid, id_cache)
-            # parent для smart back
-            id_cache.setdefault("_parent", {})[short] = f"d:{domain}"
+            dc_token = device_class if device_class is not None else "_all"
+            id_cache.setdefault("_parent", {})[short] = f"d:{domain}:{dc_token}:p{page}"
 
             icon = icon_for(eid, attrs)
+            # Префикс комнаты для контекста: «🍳 Кухня»
+            area_short = area_label[:8]
             if eid.startswith("binary_sensor."):
                 bs_icon, bs_label = binary_state_label(eid, attrs, state_val)
-                text = f"{bs_icon} {fname[:22]}: {bs_label}"
+                text = f"{bs_icon} {area_short}/{fname[:18]}: {bs_label}"[:60]
             elif domain_is_actionable(domain):
                 mark = "🟢" if state_val in ("on", "playing", "open", "unlocked", "home") else "⚪"
-                text = f"{mark} {icon} {fname[:30]}"
+                text = f"{mark} {area_short}/{fname[:22]}"[:60]
             else:
                 unit = attrs.get("unit_of_measurement", "")
                 val = format_state(state_val, attrs)
                 value_str = f"{val}{unit}" if unit else val
-                text = f"{icon} {fname[:25]}: {value_str}"[:60]
+                text = f"{area_short}/{fname[:18]}: {value_str}"[:60]
             btns.append(InlineKeyboardButton(text=text, callback_data=f"e:{short}"[:64]))
         rows.extend(_chunk(btns))
+
+        # Page navigation
+        dc_token = device_class if device_class is not None else "_all"
+        nav: list[InlineKeyboardButton] = []
+        if page > 1:
+            nav.append(InlineKeyboardButton(
+                text="◀", callback_data=f"d:{domain}:{dc_token}:p{page-1}"[:64]))
+        nav.append(InlineKeyboardButton(text=f"{page}/{total_pages}", callback_data="noop"))
+        if page < total_pages:
+            nav.append(InlineKeyboardButton(
+                text="▶", callback_data=f"d:{domain}:{dc_token}:p{page+1}"[:64]))
+        rows.append(nav)
 
     # Smart-back: для sensor/binary_sensor с device_class — обратно в подменю классов
     if device_class is not None and domain in SPLIT_BY_CLASS:

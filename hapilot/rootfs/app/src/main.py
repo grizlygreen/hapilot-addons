@@ -350,18 +350,27 @@ async def main():
                                  reply_markup=kb_domains_root(snap, vis),
                                  parse_mode="HTML")
         else:
-            parts = sub.split(":", 1)
-            domain = parts[0]
-            device_class = parts[1] if len(parts) == 2 else None
+            # Формат: domain[:dc_or_all][:pN]
+            tokens = sub.split(":")
+            domain = tokens[0]
+            device_class = None
+            page = 1
+            for t in tokens[1:]:
+                if t.startswith("p") and t[1:].isdigit():
+                    page = int(t[1:])
+                elif t == "_all":
+                    device_class = None
+                else:
+                    device_class = t
 
             # sensor/binary_sensor без device_class → подменю классов
-            if device_class is None and domain in SPLIT_BY_CLASS:
+            if device_class is None and domain in SPLIT_BY_CLASS and page == 1:
                 title, kb = kb_domain_classes(snap, domain, vis)
                 await update_message(cb, title, reply_markup=kb, parse_mode="HTML")
                 await cb.answer()
                 return
 
-            title, kb = kb_domain_entities(snap, domain, id_cache, vis, device_class)
+            title, kb = kb_domain_entities(snap, domain, id_cache, vis, device_class, page=page)
             await update_message(cb, title, reply_markup=kb, parse_mode="HTML")
             # Live: entity домена + (опц.) фильтр по классу
             def _matches(e: dict) -> bool:
@@ -379,7 +388,7 @@ async def main():
             message_id = cb.message.message_id
             async def _render():
                 s = ha.snapshot
-                t, k = kb_domain_entities(s, domain, id_cache, vis, device_class)
+                t, k = kb_domain_entities(s, domain, id_cache, vis, device_class, page=page)
                 await _safe_edit(chat_id, message_id, t, k)
             _register_live(cb, entity_ids, _render)
         await cb.answer()
@@ -576,15 +585,22 @@ async def main():
                 kb = kb_room_domain(s, area_id, domain, id_cache, vis, em)
                 await _safe_edit(chat_id, message_id, title, kb)
             _register_live(cb, entity_ids, _render)
-        elif len(parts) == 4:
-            # r:<area>:<domain>:<device_class>
-            area_id, domain, dc = parts[1], parts[2], parts[3]
+        elif len(parts) >= 4:
+            # r:<area>:<domain>:<dc_or_all>[:pN]
+            area_id, domain, dc_token = parts[1], parts[2], parts[3]
+            page = 1
+            for t in parts[4:]:
+                if t.startswith("p") and t[1:].isdigit():
+                    page = int(t[1:])
+            dc = None if dc_token == "_all" else dc_token
             area_name = next(
                 (a["name"] for a in snap.areas if a["area_id"] == area_id),
                 area_id,
             )
             table = SENSOR_BY_DEVICE_CLASS if domain == "sensor" else BINARY_BY_DEVICE_CLASS
-            if dc == "_other":
+            if dc is None:
+                dc_label = label_for_domain(domain)
+            elif dc == "_other":
                 dc_label = "Прочее"
             elif dc in table:
                 dc_label = table[dc][1]
@@ -592,15 +608,17 @@ async def main():
                 dc_label = dc
             title = f"{icon_for_area(area_name)} <b>{_h(area_name)}</b> / {_h(dc_label)}{suffix}"
             await update_message(cb, title,
-                reply_markup=kb_room_domain(snap, area_id, domain, id_cache, vis, em, device_class=dc),
+                reply_markup=kb_room_domain(snap, area_id, domain, id_cache, vis, em, device_class=dc, page=page),
                 parse_mode="HTML",
             )
-            # Live: только entity класса dc
+            # Live: entity класса (или все если dc is None)
             def _matches_dc(e: dict) -> bool:
                 if not e["entity_id"].startswith(domain + "."):
                     return False
                 if e.get("disabled_by") or not (em or vis.is_visible(e)):
                     return False
+                if dc is None:
+                    return True
                 st = snap.state(e["entity_id"]) or {}
                 this_dc = st.get("attributes", {}).get("device_class") or ""
                 return (dc == "_other" and not this_dc) or (this_dc == dc)
@@ -609,7 +627,7 @@ async def main():
             message_id = cb.message.message_id
             async def _render():
                 s = ha.snapshot
-                kb = kb_room_domain(s, area_id, domain, id_cache, vis, em, device_class=dc)
+                kb = kb_room_domain(s, area_id, domain, id_cache, vis, em, device_class=dc, page=page)
                 await _safe_edit(chat_id, message_id, title, kb)
             _register_live(cb, entity_ids, _render)
         await cb.answer()
@@ -729,6 +747,59 @@ async def main():
         if not entity_id:
             return await cb.answer("Сессия устарела", show_alert=True)
         log.info("action user=%s entity=%s action=%s", cb.from_user.id, entity_id, action)
+
+        # Спец-кейс: график истории — рендерим PNG и отправляем как фото
+        if action.startswith("graph:"):
+            try:
+                hours = int(action.split(":", 1)[1])
+            except (ValueError, IndexError):
+                return await cb.answer("Битый callback графика", show_alert=True)
+            await cb.answer(f"📊 Рисую график за {hours}ч…")
+            try:
+                from .graph import render_sparkline
+                points = await ha.history(entity_id, hours=hours)
+                st = await ha.get_state(entity_id) or {}
+                attrs = st.get("attributes", {})
+                fname = attrs.get("friendly_name", entity_id)
+                unit = attrs.get("unit_of_measurement", "")
+                period = (
+                    f"{hours} ч" if hours < 48 else f"{hours // 24} д"
+                )
+                png = render_sparkline(points, title=fname, unit=unit, period_label=period)
+                back_to = id_cache.get("_parent", {}).get(short, "m")
+                kb_graph = InlineKeyboardMarkup(inline_keyboard=[
+                    [
+                        InlineKeyboardButton(text="📊 6ч", callback_data=f"a:{short}:graph:6"),
+                        InlineKeyboardButton(text="📊 24ч", callback_data=f"a:{short}:graph:24"),
+                        InlineKeyboardButton(text="📊 7д", callback_data=f"a:{short}:graph:168"),
+                    ],
+                    [
+                        InlineKeyboardButton(text="🔙 К карточке", callback_data=f"e:{short}"),
+                        InlineKeyboardButton(text="🏠 Меню", callback_data="m"),
+                    ],
+                ])
+                photo = BufferedInputFile(png, filename=f"{entity_id}_{hours}h.png")
+                from aiogram.types import InputMediaPhoto
+                try:
+                    if cb.message.photo:
+                        await cb.message.edit_media(
+                            media=InputMediaPhoto(media=photo, caption=f"📊 {fname} — {period}"),
+                            reply_markup=kb_graph,
+                        )
+                    else:
+                        await cb.message.delete()
+                        await cb.message.answer_photo(
+                            photo, caption=f"📊 {fname} — {period}", reply_markup=kb_graph,
+                        )
+                except Exception as e:
+                    log.warning("graph send/edit failed: %s", e)
+                    await cb.message.answer_photo(
+                        photo, caption=f"📊 {fname} — {period}", reply_markup=kb_graph,
+                    )
+            except Exception as e:
+                log.warning("graph build failed for %s: %s", entity_id, e)
+                await cb.answer(f"⚠ Не удалось построить график: {e}", show_alert=True)
+            return
 
         # Спец-кейс: snapshot камеры — заменяем текущее сообщение на фото с теми же кнопками
         if action == "snapshot":

@@ -150,6 +150,20 @@ def kb_entity_actions(
             for i in range(0, len(f_btns), 3):
                 rows.append(f_btns[i:i+3])
 
+    # Графики истории для numeric sensor
+    if domain == "sensor":
+        try:
+            float(state_val)
+            is_numeric = True
+        except (ValueError, TypeError):
+            is_numeric = False
+        if is_numeric:
+            rows.append([
+                InlineKeyboardButton(text="📊 6 часов", callback_data=f"a:{short}:graph:6"),
+                InlineKeyboardButton(text="📊 24 часа", callback_data=f"a:{short}:graph:24"),
+                InlineKeyboardButton(text="📊 7 дней", callback_data=f"a:{short}:graph:168"),
+            ])
+
     if domain == "humidifier":
         cur_h = attrs.get("humidity")
         if cur_h is not None:
