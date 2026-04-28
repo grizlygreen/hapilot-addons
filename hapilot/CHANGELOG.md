@@ -38,6 +38,14 @@
 - Раздел «📋 По типам» — все entities одного домена сгруппированы по комнатам
 - noop-handler для разделителей-заголовков групп
 
+## 0.1.6 — 2026-04-28
+
+- Pre-built образы через GitHub Actions → ghcr.io/grizlygreen/{arch}-hapilot
+- Установка add-on больше не требует pip + DNS-резолва внутри docker build
+  (на части HAOS-инстансов резолв падал с "Name does not resolve"
+  при попытке тянуть aiogram с files.pythonhosted.org)
+- Установка ускорилась с ~3 мин до ~10 сек (просто image pull)
+
 ## 0.1.5 — 2026-04-28
 
 - Массовые действия в комнате: «🟢 Все вкл / ⚪ Все выкл» для light/switch/fan

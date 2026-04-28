@@ -1,0 +1,51 @@
+name: Build add-on
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "hapilot/**"
+      - ".github/workflows/build.yaml"
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, aarch64, armv7]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read add-on info
+        id: info
+        run: |
+          version=$(grep '^version:' hapilot/config.yaml | sed -E 's/version:\s*"?([^"]+)"?/\1/')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Add-on version: $version"
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build ${{ matrix.arch }}
+        uses: home-assistant/builder@2024.08.2
+        with:
+          args: |
+            --${{ matrix.arch }} \
+            --target hapilot \
+            --image "ghcr.io/grizlygreen/{arch}-hapilot" \
+            --version ${{ steps.info.outputs.version }} \
+            --docker-hub ghcr.io \
+            --addon
