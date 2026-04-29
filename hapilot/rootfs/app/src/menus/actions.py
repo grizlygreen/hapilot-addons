@@ -164,6 +164,91 @@ def kb_entity_actions(
                 InlineKeyboardButton(text="📊 7 дней", callback_data=f"a:{short}:graph:168"),
             ])
 
+    if domain == "media_player":
+        # supported_features bitmask
+        sf = attrs.get("supported_features") or 0
+        SF_PAUSE        = 1
+        SF_SEEK         = 2
+        SF_VOLUME_SET   = 4
+        SF_VOLUME_MUTE  = 8
+        SF_PREVIOUS     = 16
+        SF_NEXT         = 32
+        SF_TURN_ON      = 128
+        SF_TURN_OFF     = 256
+        SF_VOLUME_STEP  = 1024
+        SF_SELECT_SRC   = 2048
+        SF_STOP         = 4096
+        SF_PLAY         = 16384
+
+        is_off = state_val in ("off", "standby", "unavailable", "unknown")
+
+        # Питание
+        power_row = []
+        if is_off and (sf & SF_TURN_ON):
+            power_row.append(InlineKeyboardButton(text="🔌 Включить", callback_data=f"a:{short}:on"))
+        elif not is_off and (sf & SF_TURN_OFF):
+            power_row.append(InlineKeyboardButton(text="⏻ Выключить", callback_data=f"a:{short}:off"))
+        if power_row:
+            rows.append(power_row)
+
+        # Транспорт
+        transport = []
+        if sf & SF_PREVIOUS:
+            transport.append(InlineKeyboardButton(text="⏮", callback_data=f"a:{short}:mp_prev"))
+        if state_val == "playing" and (sf & SF_PAUSE):
+            transport.append(InlineKeyboardButton(text="⏸", callback_data=f"a:{short}:mp_pause"))
+        elif state_val != "playing" and (sf & SF_PLAY):
+            transport.append(InlineKeyboardButton(text="▶", callback_data=f"a:{short}:mp_play"))
+        if sf & SF_STOP:
+            transport.append(InlineKeyboardButton(text="⏹", callback_data=f"a:{short}:mp_stop"))
+        if sf & SF_NEXT:
+            transport.append(InlineKeyboardButton(text="⏭", callback_data=f"a:{short}:mp_next"))
+        if transport:
+            rows.append(transport)
+
+        # Громкость
+        if sf & (SF_VOLUME_SET | SF_VOLUME_STEP):
+            vol = attrs.get("volume_level")
+            muted = attrs.get("is_volume_muted")
+            vol_pct = f"{int(vol * 100)}%" if isinstance(vol, (int, float)) else "?"
+            vol_row = []
+            if sf & SF_VOLUME_MUTE:
+                vol_row.append(InlineKeyboardButton(
+                    text="🔊" if muted else "🔇",
+                    callback_data=f"a:{short}:mp_mute",
+                ))
+            vol_row.extend([
+                InlineKeyboardButton(text="-10", callback_data=f"a:{short}:mp_vol:-10"),
+                InlineKeyboardButton(text=f"🔊 {vol_pct}", callback_data="noop"),
+                InlineKeyboardButton(text="+10", callback_data=f"a:{short}:mp_vol:10"),
+            ])
+            rows.append(vol_row)
+
+        # Источник
+        if sf & SF_SELECT_SRC:
+            cur_src = attrs.get("source") or "—"
+            src_list = attrs.get("source_list") or []
+            if src_list:
+                rows.append([InlineKeyboardButton(
+                    text=f"📺 Источник: {cur_src[:30]}",
+                    callback_data=f"a:{short}:mp_src_list",
+                )])
+
+        # Sound mode (если есть осмысленный список — не плейсхолдер)
+        sound_modes = attrs.get("sound_mode_list") or []
+        is_placeholder = set(sound_modes) <= {"FactoryDefaults", "default", "Default"}
+        if sound_modes and 2 <= len(sound_modes) <= 6 and not is_placeholder:
+            cur = attrs.get("sound_mode")
+            sm_btns = []
+            for sm in sound_modes:
+                mark = "✓ " if sm == cur else ""
+                sm_btns.append(InlineKeyboardButton(
+                    text=f"{mark}🎵 {sm}",
+                    callback_data=f"a:{short}:mp_sm:{sm}"[:64],
+                ))
+            for i in range(0, len(sm_btns), 3):
+                rows.append(sm_btns[i:i+3])
+
     if domain == "humidifier":
         cur_h = attrs.get("humidity")
         if cur_h is not None:
@@ -333,6 +418,42 @@ async def execute_action(
         elif action.startswith("hum_mode:"):
             mode = action.split(":", 1)[1]
             await ha.call_service("humidifier", "set_mode", entity_id, {"mode": mode})
+        elif action == "mp_play":
+            await ha.call_service("media_player", "media_play", entity_id)
+        elif action == "mp_pause":
+            await ha.call_service("media_player", "media_pause", entity_id)
+        elif action == "mp_stop":
+            await ha.call_service("media_player", "media_stop", entity_id)
+        elif action == "mp_prev":
+            await ha.call_service("media_player", "media_previous_track", entity_id)
+        elif action == "mp_next":
+            await ha.call_service("media_player", "media_next_track", entity_id)
+        elif action == "mp_mute":
+            st = await ha.get_state(entity_id)
+            cur = (st or {}).get("attributes", {}).get("is_volume_muted", False)
+            await ha.call_service("media_player", "volume_mute", entity_id,
+                                  {"is_volume_muted": not cur})
+        elif action.startswith("mp_vol:"):
+            delta = int(action.split(":", 1)[1])
+            st = await ha.get_state(entity_id)
+            cur = (st or {}).get("attributes", {}).get("volume_level", 0) or 0
+            new = max(0.0, min(1.0, float(cur) + delta / 100))
+            await ha.call_service("media_player", "volume_set", entity_id,
+                                  {"volume_level": round(new, 2)})
+        elif action.startswith("mp_src:"):
+            # Выбор источника по индексу: mp_src:<idx>
+            idx = int(action.split(":", 1)[1])
+            st = await ha.get_state(entity_id)
+            src_list = (st or {}).get("attributes", {}).get("source_list") or []
+            if 0 <= idx < len(src_list):
+                await ha.call_service("media_player", "select_source", entity_id,
+                                      {"source": src_list[idx]})
+            else:
+                return False, "Источник недоступен (список изменился)"
+        elif action.startswith("mp_sm:"):
+            sm = action.split(":", 1)[1]
+            await ha.call_service("media_player", "select_sound_mode", entity_id,
+                                  {"sound_mode": sm})
         else:
             return False, f"Неизвестное действие: {action}"
         return True, "Готово"

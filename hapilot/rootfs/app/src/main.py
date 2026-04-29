@@ -220,6 +220,26 @@ async def main():
                 text += f"\nДействие: <code>{_h(str(attrs['hvac_action']))}</code>"
             if attrs.get("fan_mode"):
                 text += f"\nВентиляция: <code>{_h(str(attrs['fan_mode']))}</code>"
+        if domain == "media_player":
+            mt = attrs.get("media_title")
+            ma = attrs.get("media_artist")
+            mab = attrs.get("media_album_name")
+            src = attrs.get("source")
+            vol = attrs.get("volume_level")
+            muted = attrs.get("is_volume_muted")
+            if mt:
+                line = f"\n🎵 <b>{_h(str(mt))}</b>"
+                if ma:
+                    line += f"\n   <i>{_h(str(ma))}</i>"
+                if mab and mab != ma:
+                    line += f"\n   <code>{_h(str(mab))}</code>"
+                text += line
+            if src:
+                text += f"\nИсточник: <code>{_h(str(src))}</code>"
+            if isinstance(vol, (int, float)):
+                vmark = "🔇" if muted else "🔊"
+                text += f"\n{vmark} Громкость: <code>{int(vol*100)}%</code>"
+
         if domain == "humidifier":
             tgt_h = attrs.get("humidity")
             cur_h = attrs.get("current_humidity")
@@ -747,6 +767,41 @@ async def main():
         if not entity_id:
             return await cb.answer("Сессия устарела", show_alert=True)
         log.info("action user=%s entity=%s action=%s", cb.from_user.id, entity_id, action)
+
+        # Спец-кейс: подменю выбора источника media_player
+        if action == "mp_src_list":
+            st = await ha.get_state(entity_id) or {}
+            attrs = st.get("attributes", {})
+            cur = attrs.get("source") or ""
+            src_list = attrs.get("source_list") or []
+            if not src_list:
+                return await cb.answer("Список источников пуст", show_alert=True)
+            rows: list[list[InlineKeyboardButton]] = []
+            row: list[InlineKeyboardButton] = []
+            for i, src in enumerate(src_list[:60]):
+                mark = "✓ " if src == cur else ""
+                btn = InlineKeyboardButton(
+                    text=f"{mark}{src[:24]}",
+                    callback_data=f"a:{short}:mp_src:{i}"[:64],
+                )
+                row.append(btn)
+                if len(row) >= 2:
+                    rows.append(row); row = []
+            if row:
+                rows.append(row)
+            rows.append([
+                InlineKeyboardButton(text="🔙 К карточке", callback_data=f"e:{short}"),
+                InlineKeyboardButton(text="🏠 Меню", callback_data="m"),
+            ])
+            fname = attrs.get("friendly_name", entity_id)
+            await update_message(
+                cb,
+                f"📺 <b>{_h(fname)}</b>\nТекущий: <code>{_h(cur)}</code>\nВыбери источник:",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+                parse_mode="HTML",
+            )
+            await cb.answer()
+            return
 
         # Спец-кейс: график истории — рендерим PNG и отправляем как фото
         if action.startswith("graph:"):
