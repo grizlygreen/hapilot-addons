@@ -737,6 +737,42 @@ async def main():
         await cb_rooms(cb)
         cb.data = cb_data_orig  # type: ignore
 
+    async def _send_camera_snapshot(cb: CallbackQuery, entity_id: str, short: str) -> None:
+        """Сделать снимок камеры и показать его на месте текущего сообщения.
+        Кнопки: «🔄 Обновить» (пере-снимок) + «← Назад». Общий путь для
+        открытия камеры (мгновенное фото) и для кнопки «Обновить».
+        Live-экран НЕ регистрируем — иначе авто-рендер вернул бы текст."""
+        from aiogram.types import InputMediaPhoto
+        await cb.answer("📸 Делаю снимок…")
+        try:
+            jpeg = await ha.camera_snapshot(entity_id)
+        except Exception as e:
+            log.warning("camera snapshot failed: %s", e)
+            await cb.answer(f"⚠ Не удалось получить кадр: {e}", show_alert=True)
+            return
+        if not jpeg:
+            await cb.answer("⚠ Камера не вернула кадр", show_alert=True)
+            return
+        back_to = id_cache.get("_parent", {}).get(short, "m")
+        kb_photo = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 Обновить", callback_data=f"a:{short}:snapshot")],
+            [InlineKeyboardButton(text="← Назад", callback_data=back_to)],
+        ])
+        fname = (await ha.get_state(entity_id) or {}).get("attributes", {}).get("friendly_name", entity_id)
+        photo = BufferedInputFile(jpeg, filename=f"{entity_id}.jpg")
+        try:
+            if cb.message.photo:
+                await cb.message.edit_media(
+                    media=InputMediaPhoto(media=photo, caption=f"📷 {fname}"),
+                    reply_markup=kb_photo,
+                )
+            else:
+                await cb.message.delete()
+                await cb.message.answer_photo(photo, caption=f"📷 {fname}", reply_markup=kb_photo)
+        except Exception as e:
+            log.warning("camera snapshot edit failed: %s", e)
+            await cb.message.answer_photo(photo, caption=f"📷 {fname}", reply_markup=kb_photo)
+
     @dp.callback_query(F.data.startswith("e:"))
     async def cb_entity(cb: CallbackQuery):
         if not is_allowed(cb.from_user.id, allowed_user_ids, admin_user_ids):
@@ -745,6 +781,9 @@ async def main():
         entity_id = id_cache.get(short)
         if not entity_id:
             return await cb.answer("Сессия устарела, нажмите /start", show_alert=True)
+        # Камера: без промежуточного меню — сразу кадр (кнопка «Обновить» на фото)
+        if entity_id.startswith("camera."):
+            return await _send_camera_snapshot(cb, entity_id, short)
         back_to = id_cache.get("_parent", {}).get(short, "m")
         text, kb = await _build_card(entity_id, short, back_to)
         await update_message(cb, text, reply_markup=kb, parse_mode="HTML")
@@ -856,45 +895,9 @@ async def main():
                 await cb.answer(f"⚠ Не удалось построить график: {e}", show_alert=True)
             return
 
-        # Спец-кейс: snapshot камеры — заменяем текущее сообщение на фото с теми же кнопками
+        # Кнопка «Обновить» на фото камеры — тот же общий хелпер
         if action == "snapshot":
-            await cb.answer("📸 Делаю снимок…")
-            try:
-                jpeg = await ha.camera_snapshot(entity_id)
-                if not jpeg:
-                    await cb.answer("⚠ Камера не вернула кадр", show_alert=True)
-                    return
-                # Сохраняем фото на месте текущего сообщения, кнопки рисуем те же
-                from aiogram.types import InputMediaPhoto
-                back_to = id_cache.get("_parent", {}).get(short, "m")
-                kb_photo = InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="🔄 Обновить", callback_data=f"a:{short}:snapshot")],
-                    [InlineKeyboardButton(text="← Назад", callback_data=back_to)],
-                ])
-                fname = (await ha.get_state(entity_id) or {}).get("attributes", {}).get("friendly_name", entity_id)
-                photo = BufferedInputFile(jpeg, filename=f"{entity_id}.jpg")
-                try:
-                    # Если текущее сообщение текстовое — удаляем и шлём новое фото на его месте
-                    # Если уже фото — edit_media заменит кадр
-                    if cb.message.photo:
-                        await cb.message.edit_media(
-                            media=InputMediaPhoto(media=photo, caption=f"📷 {fname}"),
-                            reply_markup=kb_photo,
-                        )
-                    else:
-                        await cb.message.delete()
-                        await cb.message.answer_photo(
-                            photo, caption=f"📷 {fname}", reply_markup=kb_photo,
-                        )
-                except Exception as e:
-                    log.warning("camera snapshot edit failed: %s", e)
-                    await cb.message.answer_photo(
-                        photo, caption=f"📷 {fname}", reply_markup=kb_photo,
-                    )
-            except Exception as e:
-                log.warning("camera snapshot failed: %s", e)
-                await cb.answer(f"⚠ Не удалось получить кадр: {e}", show_alert=True)
-            return
+            return await _send_camera_snapshot(cb, entity_id, short)
 
         ok, msg = await execute_action(ha, entity_id, action)
         await cb.answer(msg, show_alert=not ok)

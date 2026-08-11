@@ -281,10 +281,9 @@ def kb_entity_actions(
             InlineKeyboardButton(text="↓ Закрыть", callback_data=f"a:{short}:close"),
         ])
 
-    if domain == "camera":
-        rows.append([
-            InlineKeyboardButton(text="📸 Снимок", callback_data=f"a:{short}:snapshot"),
-        ])
+    # camera: меню действий не показывается — при открытии камеры бот сразу
+    # шлёт кадр (см. _send_camera_snapshot / cb_entity), кнопка «🔄 Обновить»
+    # живёт прямо на фото.
 
     if domain == "lock":
         if state_val == "locked":
