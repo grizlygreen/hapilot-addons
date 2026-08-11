@@ -1,5 +1,5 @@
 name: HAPilot
-version: "0.1.9"
+version: "0.1.10"
 slug: hapilot
 description: Universal Telegram bot for Home Assistant — auto-discovery, no per-instance setup
 url: https://github.com/grizlygreen/hapilot-addons

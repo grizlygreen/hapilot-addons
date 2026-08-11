@@ -11,7 +11,9 @@ from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    KeyboardButton,
     Message,
+    ReplyKeyboardMarkup,
 )
 from dotenv import load_dotenv
 
@@ -83,6 +85,32 @@ async def update_message(cb, text: str, *, reply_markup=None, parse_mode: str = 
         except Exception:
             pass
         await cb.message.answer(text, reply_markup=reply_markup, parse_mode=parse_mode)
+
+
+# Reply-клавиатура верхнего уровня (persistent, под полем ввода).
+# Метки — единственный «ключ» reply-кнопок (callback_data у них нет),
+# поэтому дублируются в роутере on_reply_nav ниже. Держать в синхроне.
+BTN_ROOMS = "📍 Комнаты"
+BTN_TYPES = "📋 Типы"
+BTN_ALERTS = "🚨 Алерты"
+BTN_FAVS = "⭐ Избранное"
+BTN_SETTINGS = "⚙ Настройки"
+REPLY_NAV_LABELS = {BTN_ROOMS, BTN_TYPES, BTN_ALERTS, BTN_FAVS, BTN_SETTINGS}
+
+
+def kb_reply_main(is_admin: bool, favs_count: int = 0) -> ReplyKeyboardMarkup:
+    """Нижнее persistent-меню верхнего уровня. Вложенность — на inline."""
+    rows = [[KeyboardButton(text=BTN_ROOMS), KeyboardButton(text=BTN_TYPES)]]
+    alerts_row = [KeyboardButton(text=BTN_ALERTS)]
+    if favs_count > 0:
+        alerts_row.append(KeyboardButton(text=BTN_FAVS))
+    rows.append(alerts_row)
+    if is_admin:
+        rows.append([KeyboardButton(text=BTN_SETTINGS)])
+    return ReplyKeyboardMarkup(
+        keyboard=rows, resize_keyboard=True, is_persistent=True,
+        input_field_placeholder="Меню внизу ↓",
+    )
 
 
 def kb_main_menu(is_admin: bool, edit_mode: bool, favs_count: int = 0) -> InlineKeyboardMarkup:
@@ -166,6 +194,9 @@ async def main():
     id_cache: dict = {}
     # per-user edit mode flag
     edit_mode: dict[int, bool] = {}
+    # id последнего inline-меню, открытого через нижнюю reply-кнопку —
+    # чтобы удалять его при следующем тапе и не копить простыню
+    last_menu_msg: dict[int, int] = {}
 
     def _main_kb(uid: int) -> InlineKeyboardMarkup:
         return kb_main_menu(is_admin(uid, admin_user_ids), edit_mode.get(uid, False), len(favs))
@@ -272,11 +303,94 @@ async def main():
             await msg.reply("Доступ запрещён.")
             log.warning("denied access user_id=%s", msg.from_user.id)
             return
+        uid = msg.from_user.id
         await msg.reply(
-            f"🏠 <b>{_h(instance_name)}</b>\nВыберите способ управления:",
-            reply_markup=_main_kb(msg.from_user.id),
+            f"🏠 <b>{_h(instance_name)}</b>\nМеню внизу — выбирай раздел.",
+            reply_markup=kb_reply_main(is_admin(uid, admin_user_ids), len(favs)),
             parse_mode="HTML",
         )
+
+    @dp.message(F.text.in_(REPLY_NAV_LABELS))
+    async def on_reply_nav(msg: Message):
+        """Роутер нижних reply-кнопок → открывает inline-раздел новым сообщением.
+        Вложенная навигация дальше остаётся на inline (edit-in-place + live)."""
+        uid = msg.from_user.id
+        if not is_allowed(uid, allowed_user_ids, admin_user_ids):
+            return await msg.reply("Доступ запрещён.")
+        try:
+            snap = await ha.refresh_snapshot(cache_ttl)
+        except Exception:
+            return await msg.reply("⚠ HA сейчас недоступен. Попробуй через минуту.")
+        chat_id = msg.chat.id
+        # Чистим прошлое inline-меню и сам тап-текст, чтобы не копить простыню.
+        prev = last_menu_msg.pop(uid, None)
+        if prev:
+            try:
+                await bot.delete_message(chat_id, prev)
+            except Exception:
+                pass
+        try:
+            await msg.delete()
+        except Exception:
+            pass
+
+        t = msg.text
+        em = edit_mode.get(uid, False)
+        sent: Message | None = None
+        if t == BTN_ROOMS:
+            suffix = " 🔧" if em else ""
+            sent = await msg.answer(
+                f"🏠 <b>Комнаты</b>{suffix}",
+                reply_markup=kb_rooms_root(snap, vis, em), parse_mode="HTML",
+            )
+        elif t == BTN_TYPES:
+            sent = await msg.answer(
+                "📋 <b>По типам</b>",
+                reply_markup=kb_domains_root(snap, vis), parse_mode="HTML",
+            )
+        elif t == BTN_ALERTS:
+            try:
+                ws_url = ha.url.replace("http", "ws", 1) + "/api/websocket"
+                import json as _json
+
+                import websockets
+                async with websockets.connect(ws_url) as ws:
+                    await ws.recv()
+                    await ws.send(_json.dumps({"type": "auth", "access_token": ha.token}))
+                    await ws.recv()
+                    await ws.send(_json.dumps({"id": 1, "type": "persistent_notification/get"}))
+                    notes = _json.loads(await ws.recv()).get("result", [])
+                notif_count = len(notes)
+            except Exception:
+                notif_count = 0
+            sent = await msg.answer(
+                "🚨 <b>Алерты</b>",
+                reply_markup=kb_alerts_root(snap, notif_count), parse_mode="HTML",
+            )
+        elif t == BTN_FAVS:
+            if len(favs) == 0:
+                sent = await msg.answer("Избранное пусто. Открой entity и нажми ⭐ чтобы добавить.")
+            else:
+                sent = await msg.answer(
+                    "⭐ <b>Избранное</b>",
+                    reply_markup=kb_favorites(snap, favs, id_cache), parse_mode="HTML",
+                )
+        elif t == BTN_SETTINGS:
+            if not is_admin(uid, admin_user_ids):
+                sent = await msg.answer("Только для админа.")
+            else:
+                hidden_n, forced_n = vis.stats
+                text = (
+                    f"⚙ <b>Настройки</b>\n\n"
+                    f"Edit-mode: <b>{'ON 🔧' if em else 'OFF'}</b>\n"
+                    f"Принудительно скрыто: <b>{hidden_n}</b>\n"
+                    f"Принудительно показано: <b>{forced_n}</b>\n\n"
+                    f"В edit-mode заходи в комнаты и тыкай ✅/🙈 у каждого устройства."
+                )
+                sent = await msg.answer(text, reply_markup=kb_settings_menu(em, vis), parse_mode="HTML")
+
+        if sent is not None:
+            last_menu_msg[uid] = sent.message_id
 
     @dp.callback_query(F.data == "m")
     async def cb_main(cb: CallbackQuery):
