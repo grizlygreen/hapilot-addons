@@ -14,6 +14,7 @@ from aiogram.types import (
     KeyboardButton,
     Message,
     ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
 )
 from dotenv import load_dotenv
 
@@ -95,21 +96,26 @@ BTN_TYPES = "📋 Типы"
 BTN_ALERTS = "🚨 Алерты"
 BTN_FAVS = "⭐ Избранное"
 BTN_SETTINGS = "⚙ Настройки"
-REPLY_NAV_LABELS = {BTN_ROOMS, BTN_TYPES, BTN_ALERTS, BTN_FAVS, BTN_SETTINGS}
+BTN_CLOSE = "⬇️ Свернуть меню"
+REPLY_NAV_LABELS = {BTN_ROOMS, BTN_TYPES, BTN_ALERTS, BTN_FAVS, BTN_SETTINGS, BTN_CLOSE}
 
 
 def kb_reply_main(is_admin: bool, favs_count: int = 0) -> ReplyKeyboardMarkup:
-    """Нижнее persistent-меню верхнего уровня. Вложенность — на inline."""
+    """Нижнее меню верхнего уровня. Вложенность — на inline.
+    is_persistent=False → пользователь может свернуть клавиатуру родной
+    «шапочкой» и выйти в список чатов; плюс явная кнопка «Свернуть»."""
     rows = [[KeyboardButton(text=BTN_ROOMS), KeyboardButton(text=BTN_TYPES)]]
     alerts_row = [KeyboardButton(text=BTN_ALERTS)]
     if favs_count > 0:
         alerts_row.append(KeyboardButton(text=BTN_FAVS))
     rows.append(alerts_row)
+    last_row = [KeyboardButton(text=BTN_CLOSE)]
     if is_admin:
-        rows.append([KeyboardButton(text=BTN_SETTINGS)])
+        last_row.insert(0, KeyboardButton(text=BTN_SETTINGS))
+    rows.append(last_row)
     return ReplyKeyboardMarkup(
-        keyboard=rows, resize_keyboard=True, is_persistent=True,
-        input_field_placeholder="Меню внизу ↓",
+        keyboard=rows, resize_keyboard=True, is_persistent=False,
+        input_field_placeholder="Меню внизу ↓ (⬇️ свернуть)",
     )
 
 
@@ -337,6 +343,10 @@ async def main():
         t = msg.text
         em = edit_mode.get(uid, False)
         sent: Message | None = None
+        if t == BTN_CLOSE:
+            # Убрать нижнюю клавиатуру, чтобы можно было выйти в список чатов
+            await msg.answer("Меню свёрнуто. /start — вернуть.", reply_markup=ReplyKeyboardRemove())
+            return
         if t == BTN_ROOMS:
             suffix = " 🔧" if em else ""
             sent = await msg.answer(
