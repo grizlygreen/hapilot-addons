@@ -17,6 +17,7 @@ from ..classifiers import (
 )
 from ..ha_client import HASnapshot
 from ..visibility import VisibilityStore
+from .rooms import ON_STATES, QUICK_DOMAINS, _quick_pair
 
 # Домены, которые ВСЕГДА разбиваем по device_class (много entity → не влезет в TG)
 SPLIT_BY_CLASS = ("sensor", "binary_sensor")
@@ -203,13 +204,27 @@ def kb_domain_entities(
                 state_val = st.get("state", "?")
                 short = _short_id(eid, id_cache)
                 id_cache.setdefault("_parent", {})[short] = f"d:{domain}"
+                id_cache.setdefault("_view", {})[short] = ("dom", domain, device_class, page)
 
                 icon = icon_for(eid, attrs)
                 if eid.startswith("binary_sensor."):
                     bs_icon, bs_label = binary_state_label(eid, attrs, state_val)
                     text = f"{bs_icon} {fname[:22]}: {bs_label}"
+                elif domain in QUICK_DOMAINS:
+                    # Быстрые вкл/выкл и здесь — «по типам» ходят так же часто, как «по комнатам»
+                    mark = "🟢" if state_val in ON_STATES else "⚪"
+                    if btns:
+                        rows.extend(_chunk(btns))
+                        btns = []
+                    rows.append([
+                        InlineKeyboardButton(
+                            text=f"{mark} {icon} {fname[:22]}", callback_data=f"e:{short}"[:64]
+                        ),
+                        *_quick_pair(short),
+                    ])
+                    continue
                 elif domain_is_actionable(domain):
-                    mark = "🟢" if state_val in ("on", "playing", "open", "unlocked", "home") else "⚪"
+                    mark = "🟢" if state_val in ON_STATES else "⚪"
                     text = f"{mark} {icon} {fname[:30]}"
                 else:
                     unit = attrs.get("unit_of_measurement", "")
@@ -244,6 +259,7 @@ def kb_domain_entities(
             short = _short_id(eid, id_cache)
             dc_token = device_class if device_class is not None else "_all"
             id_cache.setdefault("_parent", {})[short] = f"d:{domain}:{dc_token}:p{page}"
+            id_cache.setdefault("_view", {})[short] = ("dom", domain, device_class, page)
 
             icon = icon_for(eid, attrs)
             # Префикс комнаты для контекста: «🍳 Кухня»
@@ -251,8 +267,21 @@ def kb_domain_entities(
             if eid.startswith("binary_sensor."):
                 bs_icon, bs_label = binary_state_label(eid, attrs, state_val)
                 text = f"{bs_icon} {area_short}/{fname[:18]}: {bs_label}"[:60]
+            elif domain in QUICK_DOMAINS:
+                mark = "🟢" if state_val in ON_STATES else "⚪"
+                if btns:
+                    rows.extend(_chunk(btns))
+                    btns = []
+                rows.append([
+                    InlineKeyboardButton(
+                        text=f"{mark} {area_short}/{fname[:16]}"[:40],
+                        callback_data=f"e:{short}"[:64],
+                    ),
+                    *_quick_pair(short),
+                ])
+                continue
             elif domain_is_actionable(domain):
-                mark = "🟢" if state_val in ("on", "playing", "open", "unlocked", "home") else "⚪"
+                mark = "🟢" if state_val in ON_STATES else "⚪"
                 text = f"{mark} {area_short}/{fname[:22]}"[:60]
             else:
                 unit = attrs.get("unit_of_measurement", "")

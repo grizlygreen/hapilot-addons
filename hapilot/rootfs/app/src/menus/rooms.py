@@ -307,7 +307,7 @@ def kb_room_domain(
         id_cache.setdefault("_parent", {})[short] = f"r:{area_id}:{domain}"
         # …и точный вид списка — чтобы после быстрого вкл/выкл вернуться
         # на ту же страницу и с тем же фильтром, а не в начало
-        id_cache.setdefault("_view", {})[short] = (area_id, domain, device_class, page)
+        id_cache.setdefault("_view", {})[short] = ("room", area_id, domain, device_class, page)
 
         if edit:
             visible_now = vis.is_visible(e)

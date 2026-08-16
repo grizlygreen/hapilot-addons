@@ -849,8 +849,15 @@ async def main():
         suffix = " 🔧" if em else ""
         view = id_cache.get("_view", {}).get(short)
         try:
-            if view:
-                area_id, domain, dc, page = view
+            if view and view[0] == "dom":
+                # Экран «по типам»: заголовок собирает сама kb_domain_entities
+                _, domain, dc, page = view
+                title, kb = kb_domain_entities(
+                    ha.snapshot, domain, id_cache, vis, dc, page=page
+                )
+                await update_message(cb, title, reply_markup=kb, parse_mode="HTML")
+            elif view and view[0] == "room":
+                _, area_id, domain, dc, page = view
                 area_name = next(
                     (a["name"] for a in snap.areas if a["area_id"] == area_id), area_id
                 )
