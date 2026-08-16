@@ -837,6 +837,126 @@ async def main():
         except Exception:
             pass
 
+    async def _redraw_after_quick(cb: CallbackQuery, short: str) -> None:
+        """Перерисовать тот же экран, с которого нажали быстрое вкл/выкл.
+
+        Пользователь остаётся там, где был: та же комната, тот же фильтр и
+        страница — иначе после каждого тапа его выбрасывает в начало списка.
+        """
+        await ha.refresh_snapshot(cache_ttl, force=True)
+        snap = ha.snapshot
+        em = edit_mode.get(cb.from_user.id, False)
+        suffix = " 🔧" if em else ""
+        view = id_cache.get("_view", {}).get(short)
+        try:
+            if view:
+                area_id, domain, dc, page = view
+                area_name = next(
+                    (a["name"] for a in snap.areas if a["area_id"] == area_id), area_id
+                )
+                await update_message(
+                    cb,
+                    f"{icon_for_area(area_name)} <b>{_h(area_name)}</b> / {_h(domain)}{suffix}",
+                    reply_markup=kb_room_domain(
+                        snap, area_id, domain, id_cache, vis, em,
+                        device_class=dc, page=page,
+                    ),
+                    parse_mode="HTML",
+                )
+            elif id_cache.get("_parent", {}).get(short) == "f:":
+                await update_message(
+                    cb, "⭐ <b>Избранное</b>",
+                    reply_markup=kb_favorites(snap, favs, id_cache),
+                    parse_mode="HTML",
+                )
+        except Exception:
+            pass
+
+    @dp.callback_query(F.data.startswith("q:"))
+    async def cb_quick_toggle(cb: CallbackQuery):
+        """Быстрое вкл/выкл из списка: q:<short>:<on|off> — без захода в карточку."""
+        if not is_allowed(cb.from_user.id, allowed_user_ids, admin_user_ids):
+            return await cb.answer("Доступ запрещён", show_alert=True)
+        try:
+            _, short, action = cb.data.split(":", 2)
+        except ValueError:
+            return await cb.answer("Битый callback", show_alert=True)
+        if action not in ("on", "off"):
+            return await cb.answer("Битый callback", show_alert=True)
+        eid = id_cache.get(short)
+        if not eid:
+            return await cb.answer("Сессия устарела, открой меню заново", show_alert=True)
+
+        domain = eid.split(".", 1)[0]
+        service = "turn_on" if action == "on" else "turn_off"
+        try:
+            await ha.call_service(domain, service, eid)
+        except Exception as e:
+            log.warning("quick %s on %s failed: %s", service, eid, e)
+            return await cb.answer(f"⚠ Не вышло: {e}", show_alert=True)
+
+        await cb.answer("✓ включил" if action == "on" else "✓ выключил")
+        log.info("quick user=%s entity=%s action=%s", cb.from_user.id, eid, action)
+        await _redraw_after_quick(cb, short)
+
+    @dp.callback_query(F.data.startswith("bx:"))
+    async def cb_room_lights(cb: CallbackQuery):
+        """Весь свет комнаты со списка комнат: bx:<area_id>:<on|off>.
+
+        Отличие от ba: перерисовка остаётся на списке комнат — пользователь
+        гасит свет в нескольких комнатах подряд, не проваливаясь внутрь.
+        """
+        if not is_allowed(cb.from_user.id, allowed_user_ids, admin_user_ids):
+            return await cb.answer("Доступ запрещён", show_alert=True)
+        try:
+            _, area_id, action = cb.data.split(":", 2)
+        except ValueError:
+            return await cb.answer("Битый callback", show_alert=True)
+        if action not in ("on", "off"):
+            return await cb.answer("Битый callback", show_alert=True)
+        try:
+            snap = await ha.refresh_snapshot(cache_ttl)
+        except Exception:
+            return await cb.answer("⚠ HA недоступен", show_alert=True)
+
+        targets = [
+            e["entity_id"] for e in snap.entities_in_area(area_id)
+            if e["entity_id"].startswith("light.")
+            and not e.get("disabled_by")
+            and vis.is_visible(e)
+        ]
+        if not targets:
+            return await cb.answer("В комнате нет света", show_alert=True)
+
+        service = "turn_on" if action == "on" else "turn_off"
+        ok = 0
+        for eid in targets:
+            try:
+                await ha.call_service("light", service, eid)
+                ok += 1
+            except Exception as e:
+                log.warning("room lights %s on %s failed: %s", service, eid, e)
+
+        verb = "включил" if action == "on" else "выключил"
+        if ok < len(targets):
+            await cb.answer(f"⚠ {verb} {ok}/{len(targets)}", show_alert=True)
+        else:
+            await cb.answer(f"✓ {verb} свет ({ok})")
+        log.info("room-lights user=%s area=%s action=%s ok=%d/%d",
+                 cb.from_user.id, area_id, action, ok, len(targets))
+
+        await ha.refresh_snapshot(cache_ttl, force=True)
+        em = edit_mode.get(cb.from_user.id, False)
+        suffix = " 🔧" if em else ""
+        try:
+            await update_message(
+                cb, f"🏠 <b>Комнаты</b>{suffix}",
+                reply_markup=kb_rooms_root(ha.snapshot, vis, em),
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+
     @dp.callback_query(F.data.startswith("v:"))
     async def cb_visibility_toggle(cb: CallbackQuery):
         if not is_admin(cb.from_user.id, admin_user_ids):

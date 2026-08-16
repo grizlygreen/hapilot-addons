@@ -78,6 +78,27 @@ PAGE_SIZE = 60
 #   r:<area_id>                 → область → группы по доменам
 #   r:<area_id>:<domain>        → область + домен → entities
 #   e:<short_id>                → действие над entity (lookup в кэше)
+#   q:<short_id>:<on|off>       → быстрое вкл/выкл прямо из списка, без захода в карточку
+#   bx:<area_id>:<on|off>       → весь свет комнаты, перерисовка остаётся на списке комнат
+
+# Домены, которым в списке рисуем быстрые кнопки вкл/выкл (бинарные по сути).
+# Остальные actionable-домены (media_player, climate, cover) слишком многосостоятельные —
+# для них по-прежнему только карточка с настройками.
+QUICK_DOMAINS = ("light", "switch", "fan", "input_boolean", "siren")
+
+ON_STATES = ("on", "playing", "open", "unlocked", "home")
+
+
+def _quick_pair(short: str) -> list[InlineKeyboardButton]:
+    """Две узкие кнопки вкл/выкл для строки устройства.
+
+    Всегда обе, а не один toggle: результат предсказуем даже если состояние
+    на экране устарело — «выкл» всегда даёт выкл.
+    """
+    return [
+        InlineKeyboardButton(text="🟢", callback_data=f"q:{short}:on"[:64]),
+        InlineKeyboardButton(text="⚪", callback_data=f"q:{short}:off"[:64]),
+    ]
 
 
 def kb_rooms_root(snap: HASnapshot, vis: VisibilityStore, edit: bool = False) -> InlineKeyboardMarkup:
@@ -95,17 +116,41 @@ def kb_rooms_root(snap: HASnapshot, vis: VisibilityStore, edit: bool = False) ->
         if ea:
             by_area[ea] += 1
 
+    # Где в комнате есть свет — только там показываем быстрые кнопки
+    lights_by_area: dict[str, int] = defaultdict(int)
+    for e in snap.entities:
+        if e.get("disabled_by") or not e["entity_id"].startswith("light."):
+            continue
+        if not edit and not vis.is_visible(e):
+            continue
+        ea = e.get("area_id") or device_areas.get(e.get("device_id"))
+        if ea:
+            lights_by_area[ea] += 1
+
     sorted_areas = sorted(snap.areas, key=lambda a: a["name"].lower())
     btns = []
     for area in sorted_areas:
-        n = by_area.get(area["area_id"], 0)
+        aid = area["area_id"]
+        n = by_area.get(aid, 0)
         if n == 0:
             continue
         ai = icon_for_area(area["name"])
-        btns.append(InlineKeyboardButton(
+        room_btn = InlineKeyboardButton(
             text=f"{ai} {area['name']} ({n})",
-            callback_data=f"r:{area['area_id']}"[:64],
-        ))
+            callback_data=f"r:{aid}"[:64],
+        )
+        # Есть свет и не edit-режим → отдельная строка: комната + вкл/выкл всего света
+        if not edit and lights_by_area.get(aid):
+            if btns:
+                rows.extend(_chunk(btns))
+                btns = []
+            rows.append([
+                room_btn,
+                InlineKeyboardButton(text="🟢", callback_data=f"bx:{aid}:on"[:64]),
+                InlineKeyboardButton(text="⚪", callback_data=f"bx:{aid}:off"[:64]),
+            ])
+        else:
+            btns.append(room_btn)
     rows.extend(_chunk(btns))
     rows.append([InlineKeyboardButton(text="← Главное меню", callback_data="m")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -260,14 +305,29 @@ def kb_room_domain(
         short = _short_id(eid, id_cache)
         # Запомним «родителя» этой entity — для smart back
         id_cache.setdefault("_parent", {})[short] = f"r:{area_id}:{domain}"
+        # …и точный вид списка — чтобы после быстрого вкл/выкл вернуться
+        # на ту же страницу и с тем же фильтром, а не в начало
+        id_cache.setdefault("_view", {})[short] = (area_id, domain, device_class, page)
 
         if edit:
             visible_now = vis.is_visible(e)
             vis_mark = "✅" if visible_now else "🙈"
             text = f"{vis_mark} {icon} {fname[:30]}"
             btns.append(InlineKeyboardButton(text=text, callback_data=f"v:{short}"[:64]))
+        elif domain in QUICK_DOMAINS:
+            # Строка = [состояние + имя] [🟢] [⚪]: включить/выключить без захода в карточку
+            mark = "🟢" if state_val in ON_STATES else "⚪"
+            if btns:
+                rows.extend(_chunk(btns))
+                btns = []
+            rows.append([
+                InlineKeyboardButton(
+                    text=f"{mark} {icon} {fname[:22]}", callback_data=f"e:{short}"[:64]
+                ),
+                *_quick_pair(short),
+            ])
         elif domain_is_actionable(domain):
-            mark = "🟢" if state_val in ("on", "playing", "open", "unlocked", "home") else "⚪"
+            mark = "🟢" if state_val in ON_STATES else "⚪"
             text = f"{mark} {icon} {fname[:30]}"
             btns.append(InlineKeyboardButton(text=text, callback_data=f"e:{short}"[:64]))
         elif eid.startswith("binary_sensor."):

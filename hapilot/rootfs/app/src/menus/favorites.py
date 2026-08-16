@@ -5,7 +5,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from ..classifiers import binary_state_label, domain_is_actionable, format_state, icon_for
 from ..favorites import FavoritesStore
 from ..ha_client import HASnapshot
-from .rooms import _chunk, _short_id
+from .rooms import ON_STATES, QUICK_DOMAINS, _chunk, _quick_pair, _short_id
 
 
 def kb_favorites(
@@ -37,8 +37,21 @@ def kb_favorites(
         if eid.startswith("binary_sensor."):
             bs_icon, bs_label = binary_state_label(eid, attrs, state_val)
             text = f"{bs_icon} {fname[:22]}: {bs_label}"[:60]
+        elif domain in QUICK_DOMAINS:
+            # Избранное — самый частый сценарий, вкл/выкл прямо здесь: один тап от главной
+            mark = "🟢" if state_val in ON_STATES else "⚪"
+            if btns:
+                rows.extend(_chunk(btns))
+                btns = []
+            rows.append([
+                InlineKeyboardButton(
+                    text=f"{mark} {icon} {fname[:22]}", callback_data=f"e:{short}"[:64]
+                ),
+                *_quick_pair(short),
+            ])
+            continue
         elif domain_is_actionable(domain):
-            mark = "🟢" if state_val in ("on", "playing", "open", "unlocked", "home") else "⚪"
+            mark = "🟢" if state_val in ON_STATES else "⚪"
             text = f"{mark} {icon} {fname[:30]}"
         else:
             unit = attrs.get("unit_of_measurement", "")
