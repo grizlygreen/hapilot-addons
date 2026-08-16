@@ -69,23 +69,48 @@ def _h(s) -> str:
     )
 
 
+# id последнего inline-меню на пользователя. Модульный уровень (а не локальный
+# в main()), чтобы update_message мог его чинить: раньше при пересоздании
+# сообщения трекер оставался со старым id, чистка удаляла «призрак», а живое
+# меню копилось в чате простынёй.
+MENU_MSG: dict[int, int] = {}
+
+
 async def update_message(cb, text: str, *, reply_markup=None, parse_mode: str = "HTML"):
     """Обновить текущее сообщение текстом + клавиатурой.
+
     Если текущее сообщение — фото (camera snapshot), удалить и отправить новое.
+    Везде, где сообщение пересоздаётся, обновляем MENU_MSG — иначе следующая
+    чистка промахнётся мимо реального меню.
     """
     from aiogram.exceptions import TelegramBadRequest
+
+    uid = getattr(getattr(cb, "from_user", None), "id", None)
+
+    def _remember(sent) -> None:
+        mid = getattr(sent, "message_id", None)
+        if uid is not None and mid is not None:
+            MENU_MSG[uid] = mid
+
     try:
         if cb.message.photo:
             await cb.message.delete()
-            await cb.message.answer(text, reply_markup=reply_markup, parse_mode=parse_mode)
+            _remember(await cb.message.answer(
+                text, reply_markup=reply_markup, parse_mode=parse_mode))
         else:
             await cb.message.edit_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
-    except TelegramBadRequest:
+    except TelegramBadRequest as e:
+        # «message is not modified» — это НЕ ошибка: содержимое уже такое, какое надо.
+        # Пересоздавать сообщение в этом случае нельзя: меню прыгает вниз чата,
+        # id меняется, трекер ломается — так и растёт простыня старых клавиатур.
+        if "not modified" in str(e).lower():
+            return
         try:
             await cb.message.delete()
         except Exception:
             pass
-        await cb.message.answer(text, reply_markup=reply_markup, parse_mode=parse_mode)
+        _remember(await cb.message.answer(
+            text, reply_markup=reply_markup, parse_mode=parse_mode))
 
 
 # Reply-клавиатура верхнего уровня (persistent, под полем ввода).
@@ -200,9 +225,9 @@ async def main():
     id_cache: dict = {}
     # per-user edit mode flag
     edit_mode: dict[int, bool] = {}
-    # id последнего inline-меню, открытого через нижнюю reply-кнопку —
-    # чтобы удалять его при следующем тапе и не копить простыню
-    last_menu_msg: dict[int, int] = {}
+    # id последнего inline-меню — тот же словарь, что MENU_MSG на модульном уровне,
+    # чтобы update_message мог обновлять его при пересоздании сообщения
+    last_menu_msg: dict[int, int] = MENU_MSG
 
     def _main_kb(uid: int) -> InlineKeyboardMarkup:
         return kb_main_menu(is_admin(uid, admin_user_ids), edit_mode.get(uid, False), len(favs))
